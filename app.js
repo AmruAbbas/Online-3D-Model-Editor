@@ -29,6 +29,10 @@ import { unzipSync, zipSync, strToU8, strFromU8 } from 'three/addons/libs/fflate
 /* Constants & tiny helpers                                            */
 /* ------------------------------------------------------------------ */
 
+// App version — shown in the header. Rules: +0.1 for a small feature update, +1 for a revamp or
+// major feature update, and a letter suffix (b, c, d…) for bug-fix-only releases of the same version.
+const APP_VERSION = 'v1.1';
+
 const THREE_CDN = 'https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/';
 const GH_MODELS = 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r170/examples/models/';
 const SUPPORTED_EXT = ['obj', 'fbx', 'glb', 'gltf', 'stl', 'ply', 'dae', '3mf'];
@@ -2891,6 +2895,7 @@ window.addEventListener('keydown', (e) => {
 /* Boot                                                                */
 /* ------------------------------------------------------------------ */
 
+$('app-version').textContent = APP_VERSION;
 setLightPreset(0);
 setViewMode('pbr');
 setTool('move', true);
@@ -2907,7 +2912,7 @@ updatePresetChips();
 updatePartButtons();
 updateDownloadLabel();
 
-console.info('%cOnline 3D Studio ready — three.js r170, 100% client-side.', 'color:#4cd7f6;font-weight:bold;');
+console.info(`%cOnline 3D Studio ${APP_VERSION} ready — three.js r170, 100% client-side.`, 'color:#4cd7f6;font-weight:bold;');
 
 // Expose a small API (handy for power users & automated tests)
 window.aether3d = {
@@ -2918,6 +2923,6 @@ window.aether3d = {
   downloadOriginal,
   setViewMode,
   setTool,
-  version: '2.4.0',
+  version: APP_VERSION,
   three: THREE.REVISION,
 };
