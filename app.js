@@ -31,7 +31,7 @@ import { unzipSync, zipSync, strToU8, strFromU8 } from 'three/addons/libs/fflate
 
 // App version — shown in the header. Rules: +0.1 for a small feature update, +1 for a revamp or
 // major feature update, and a letter suffix (b, c, d…) for bug-fix-only releases of the same version.
-const APP_VERSION = 'v1.2';
+const APP_VERSION = 'v1.3';
 
 const THREE_CDN = 'https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/';
 const GH_MODELS = 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r170/examples/models/';
@@ -914,6 +914,8 @@ function clearModel(updateUI = true) {
   state.modelRoot = null;
   state.meshes = [];
   state.scope = null;
+  state.faceSel = null;
+  if (typeof refreshFaceOverlay === 'function') { faceOverlay.visible = faceEdges.visible = false; }
   state.history = [];
   state.hIndex = -1;
   state.activePreset = null;
@@ -1120,6 +1122,7 @@ function setScope(node) {
   $('insp-scope-label').textContent = label;
   $('mat-scope-label').textContent = label;
   $('insp-scope-label').title = $('mat-scope-label').title = label;
+  if (state.faceSel && (!node || state.faceSel.rec.mesh !== node)) { state.faceSel = null; refreshFaceOverlay(); updateFacePanel(); }
   attachGizmo();
   buildOutliner();
   updateSelBox();
@@ -1130,6 +1133,7 @@ function setScope(node) {
   updatePartButtons();
   syncTextureControls();
   renderTexLibrary();
+  updateMaterialScopeLabel();
 }
 
 function updatePartButtons() {
@@ -1177,6 +1181,7 @@ canvas.addEventListener('pointerup', (e) => {
   raycaster.setFromCamera(ndc, activeCam);
   const targets = state.meshes.filter((r) => !r.isPoints && r.mesh.visible).map((r) => r.mesh);
   const hits = raycaster.intersectObjects(targets, false);
+  if (state.tool === 'faces') return onFaceClick(e, hits[0]);
   if (hits.length) {
     const hit = hits[0].object;
     const top = topObjectOf(hit) || hit;
@@ -1199,11 +1204,25 @@ canvas.addEventListener('pointerup', (e) => {
 /* Tools & transform gizmo                                             */
 /* ------------------------------------------------------------------ */
 
-const TOOL_MODE = { select: null, move: 'translate', rotate: 'rotate', scale: 'scale' };
+const TOOL_MODE = { select: null, move: 'translate', rotate: 'rotate', scale: 'scale', faces: null };
 function setTool(tool, force) {
   if (!force && tool === state.tool) return;
+  const was = state.tool;
   state.tool = tool;
   attachGizmo();
+  if (tool === 'faces' || was === 'faces') {
+    if (tool !== 'faces') state.faceSel = null;
+    refreshFaceOverlay();
+    updateFacePanel();
+    updateMaterialScopeLabel();
+    syncMaterialSliders();
+    syncTextureControls();
+    renderTexLibrary();
+    if (tool === 'faces' && !faceHintShown && state.modelRoot) {
+      faceHintShown = true;
+      toast('<b>Faces</b>: click a face to select it (Shift adds, Alt removes). <b>Flat area</b> picks a whole side at once. Then change Color, Material presets or Textures in the Inspector — only those faces change.', 'info', 9000);
+    }
+  }
   document.querySelectorAll('.transform-tool-btn').forEach((b) => {
     const on = b.dataset.tool === tool;
     b.classList.toggle('bg-primary-container', on);
@@ -1327,6 +1346,8 @@ function makeScopeMaterialsUnique() {
 }
 
 function eachScopeMaterial(fn) {
+  const fm = faceMaterials();
+  if (fm) { fm.forEach((m) => m && fn(m)); return fm.length; }
   makeScopeMaterialsUnique();
   let touched = 0;
   for (const rec of scopeRecs()) {
@@ -1367,6 +1388,8 @@ function removeTextures() {
 }
 
 function eachScopePBRMaterial(fn) {
+  const fm = faceMaterials();
+  if (fm) { let n = 0; fm.forEach((m) => { if (m && (m.isMeshStandardMaterial || m.isMeshPhysicalMaterial)) { fn(m); n++; } }); return n; }
   makeScopeMaterialsUnique();
   let touched = 0;
   for (const rec of scopeRecs()) {
@@ -1416,9 +1439,21 @@ function applyPreset(name) {
   if (!p || !state.modelRoot) { if (!state.modelRoot) toast('Load a model first.', 'warn'); return; }
   const recs = scopeRecs().filter((r) => !r.isPoints);
   if (!recs.length) return toast('No polygon meshes in scope.', 'warn');
-  for (const rec of recs) {
-    // dispose only the materials we are replacing if nothing else references them (history does — so skip disposal)
-    rec.baseMaterial = p.make();
+  const fm = faceMaterials();
+  if (fm) {
+    // swap only the selected faces' materials
+    const rec = state.faceSel.rec;
+    const mats = [].concat(rec.baseMaterial);
+    state.faceSel.materials = fm.map((old) => {
+      const nm = p.make();
+      if (old && old.map) nm.map = old.map; // keep a texture already on these faces
+      const i = mats.indexOf(old);
+      if (i >= 0) mats[i] = nm;
+      return nm;
+    });
+    rec.baseMaterial = mats.length > 1 ? mats : mats[0];
+  } else {
+    for (const rec of recs) rec.baseMaterial = p.make();
   }
   state.activePreset = name;
   setViewMode('pbr');
@@ -1442,8 +1477,8 @@ function updatePresetChips() {
 }
 
 function syncMaterialSliders() {
-  let m = null;
-  for (const rec of scopeRecs()) {
+  let m = faceDisplayMaterial();
+  if (!m) for (const rec of scopeRecs()) {
     const mats = Array.isArray(rec.baseMaterial) ? rec.baseMaterial : [rec.baseMaterial];
     m = mats.find((x) => x && (x.isMeshStandardMaterial || x.isMeshPhysicalMaterial)) || m;
     if (m) break;
@@ -1534,6 +1569,7 @@ function subdivideGeometry(src) {
       geo.setAttribute(n, new THREE.BufferAttribute(out, item));
     }
     geo.setIndex(new THREE.BufferAttribute(outIdx.subarray(0, w), 1));
+    for (const grp of g.groups) geo.addGroup(grp.start * 4, grp.count * 4, grp.materialIndex); // each triangle became 4, in order
     return geo;
   } catch (e) {
     console.warn('[Online3D] subdivide failed:', e);
@@ -1619,6 +1655,8 @@ function decimateGeometry(src, targetTris) {
 
     const faceSeen = new Set();
     const outIdx = [];
+    const srcMat = g.groups && g.groups.length ? triMaterials(g) : null;
+    const outMat = [];
     for (let t = 0; t < triCount; t++) {
       const a = idx[3 * t], b = idx[3 * t + 1], c = idx[3 * t + 2];
       const ka = keyOf(cc, a, G), kb = keyOf(cc, b, G), kc = keyOf(cc, c, G);
@@ -1628,6 +1666,7 @@ function decimateGeometry(src, targetTris) {
       if (faceSeen.has(fk)) continue;
       faceSeen.add(fk);
       outIdx.push(newIndexOf(repOf(ka, a)), newIndexOf(repOf(kb, b)), newIndexOf(repOf(kc, c)));
+      if (srcMat) outMat.push(srcMat[t]);
     }
     if (outIdx.length < 3) return g;
 
@@ -1643,7 +1682,22 @@ function decimateGeometry(src, targetTris) {
       }
       geo.setAttribute(n, new THREE.BufferAttribute(out, item));
     }
-    geo.setIndex(outIdx);
+    if (srcMat) {
+      // keep per-face materials: order the triangles by material and rebuild the groups
+      const n = outMat.length, order = [...Array(n).keys()].sort((x, y) => outMat[x] - outMat[y] || x - y);
+      const sorted = [];
+      for (const i of order) sorted.push(outIdx[3 * i], outIdx[3 * i + 1], outIdx[3 * i + 2]);
+      geo.setIndex(sorted);
+      let start = 0;
+      for (let i = 1; i <= n; i++) {
+        if (i === n || outMat[order[i]] !== outMat[order[start]]) {
+          if (outMat[order[start]] >= 0) geo.addGroup(start * 3, (i - start) * 3, outMat[order[start]]);
+          start = i;
+        }
+      }
+    } else {
+      geo.setIndex(outIdx);
+    }
     geo.computeVertexNormals();
     return geo;
   } catch (e) {
@@ -1674,6 +1728,7 @@ function setRecGeometry(rec, g) {
 }
 
 function afterGeometryOp(msg) {
+  if (state.faceSel && state.faceSel.set.size) clearFaceSelection(); // triangle numbering changed
   refreshStats();
   syncPolySliderUI();
   updateSelBox();
@@ -1768,6 +1823,7 @@ function applyPolyRatio(pct) {
     if (g) { rec.mesh.geometry = g; rec.pct = pct; changed++; }
   }
   if (changed) {
+    if (state.faceSel && state.faceSel.set.size) clearFaceSelection();
     refreshStats();
     updateSelBox();
     pushHistory();
@@ -2114,8 +2170,10 @@ function applySnapshot(s) {
     return { mesh: r.mesh, baseMaterial: cloneMaterial(r.material), baseline: r.baseline, pct: r.pct, editable: r.editable, isPoints: r.isPoints };
   });
   state.scope = s.scope && keep.has(s.scope) ? s.scope : null;
+  if (state.faceSel) { state.faceSel.set = new Set(); state.faceSel.materials = null; }
   setViewMode(state.viewMode);
   setScope(state.scope);
+  afterFaceSelectionChange();
 }
 
 function undo() {
@@ -2494,6 +2552,335 @@ function typicalSize() {
 }
 
 /* ------------------------------------------------------------------ */
+/* Face selection: pick triangles, give them their own material        */
+/* ------------------------------------------------------------------ */
+
+// state.faceSel = { rec, set:Set<tri>, materials:[Material]|null }  (materials = the selection's own
+// materials, created on the first edit; reset whenever the selection changes)
+state.faceSel = null;
+let faceMode = 'flat';
+let faceAngle = 15;
+let faceHintShown = false;
+const adjCache = new WeakMap(); // geometry -> { start, list, normals, triCount }
+
+const triCountOf = (g) => Math.floor((g.index ? g.index.count : g.getAttribute('position').count) / 3);
+function triVerts(g) {
+  const idx = g.index ? g.index.array : null;
+  return idx ? (t, k) => idx[3 * t + k] : (t, k) => 3 * t + k;
+}
+
+// Triangle neighbours (sharing an edge, welded by position) + face normals, cached per geometry
+function adjacencyOf(g) {
+  let a = adjCache.get(g);
+  if (a) return a;
+  const pos = g.getAttribute('position');
+  const vc = pos.count, tc = triCountOf(g), tv = triVerts(g);
+  const tol = tolOf(g) * 10;
+  const weld = new Int32Array(vc);
+  const wmap = new Map();
+  for (let i = 0; i < vc; i++) {
+    const k = Math.round(pos.getX(i) / tol) + '_' + Math.round(pos.getY(i) / tol) + '_' + Math.round(pos.getZ(i) / tol);
+    let id = wmap.get(k);
+    if (id === undefined) { id = wmap.size; wmap.set(k, id); }
+    weld[i] = id;
+  }
+  const W = wmap.size;
+  const edges = new Map();
+  const normals = new Float32Array(tc * 3);
+  const va = new THREE.Vector3(), vb = new THREE.Vector3(), vcv = new THREE.Vector3(), n = new THREE.Vector3();
+  for (let t = 0; t < tc; t++) {
+    const i0 = tv(t, 0), i1 = tv(t, 1), i2 = tv(t, 2);
+    va.fromBufferAttribute(pos, i0); vb.fromBufferAttribute(pos, i1); vcv.fromBufferAttribute(pos, i2);
+    n.subVectors(vcv, vb).cross(va.sub(vb)).normalize();
+    normals[3 * t] = n.x; normals[3 * t + 1] = n.y; normals[3 * t + 2] = n.z;
+    const w = [weld[i0], weld[i1], weld[i2]];
+    for (let k = 0; k < 3; k++) {
+      const p = w[k], q = w[(k + 1) % 3];
+      if (p === q) continue;
+      const key = p < q ? p * W + q : q * W + p;
+      const l = edges.get(key);
+      if (l) l.push(t); else edges.set(key, [t]);
+    }
+  }
+  const deg = new Int32Array(tc + 1);
+  for (const l of edges.values()) if (l.length > 1) for (const t of l) deg[t + 1] += l.length - 1;
+  for (let t = 0; t < tc; t++) deg[t + 1] += deg[t];
+  const list = new Int32Array(deg[tc]);
+  const fill = deg.slice(0, tc);
+  for (const l of edges.values()) {
+    if (l.length < 2) continue;
+    for (const t of l) for (const u of l) if (u !== t) list[fill[t]++] = u;
+  }
+  a = { start: deg, list, normals, triCount: tc };
+  adjCache.set(g, a);
+  return a;
+}
+
+function floodFaces(g, seed, mode) {
+  const a = adjacencyOf(g);
+  if (mode === 'tri') return [seed];
+  const cosLim = Math.cos(THREE.MathUtils.degToRad(faceAngle));
+  const nx = a.normals[3 * seed], ny = a.normals[3 * seed + 1], nz = a.normals[3 * seed + 2];
+  const seen = new Uint8Array(a.triCount);
+  const out = [seed];
+  seen[seed] = 1;
+  for (let i = 0; i < out.length; i++) {
+    const t = out[i];
+    for (let j = a.start[t]; j < a.start[t + 1]; j++) {
+      const u = a.list[j];
+      if (seen[u]) continue;
+      if (mode === 'flat' && a.normals[3 * u] * nx + a.normals[3 * u + 1] * ny + a.normals[3 * u + 2] * nz < cosLim) continue;
+      seen[u] = 1;
+      out.push(u);
+    }
+  }
+  return out;
+}
+
+const faceActive = () => state.tool === 'faces' && state.faceSel && state.faceSel.set.size > 0 && state.meshes.includes(state.faceSel.rec);
+
+// Highlight overlay — lives in the scene (not the model, so it's never exported), follows the mesh
+const faceOverlay = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({
+  color: 0x4cd7f6, transparent: true, opacity: 0.16, depthWrite: false, side: THREE.DoubleSide,
+  polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4, toneMapped: false,
+}));
+faceOverlay.matrixAutoUpdate = false;
+faceOverlay.visible = false;
+faceOverlay.renderOrder = 5;
+scene.add(faceOverlay);
+const faceEdges = new THREE.LineSegments(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: 0x4cd7f6, transparent: true, opacity: 1, depthTest: true, toneMapped: false }));
+faceEdges.matrixAutoUpdate = false;
+faceEdges.visible = false;
+faceEdges.renderOrder = 6;
+scene.add(faceEdges);
+
+function refreshFaceOverlay() {
+  const fs = state.faceSel;
+  const on = !!(fs && fs.set.size && state.tool === 'faces' && fs.rec.mesh.parent);
+  faceOverlay.visible = faceEdges.visible = on;
+  if (!on) return;
+  const g = fs.rec.mesh.geometry, pos = g.getAttribute('position'), tv = triVerts(g);
+  const tris = [...fs.set];
+  const arr = new Float32Array(tris.length * 9);
+  const lines = new Float32Array(tris.length * 18);
+  let w = 0, l = 0;
+  for (const t of tris) {
+    const vs = [tv(t, 0), tv(t, 1), tv(t, 2)];
+    for (const v of vs) { arr[w++] = pos.getX(v); arr[w++] = pos.getY(v); arr[w++] = pos.getZ(v); }
+    for (let k = 0; k < 3; k++) for (const v of [vs[k], vs[(k + 1) % 3]]) { lines[l++] = pos.getX(v); lines[l++] = pos.getY(v); lines[l++] = pos.getZ(v); }
+  }
+  faceOverlay.geometry.dispose();
+  faceOverlay.geometry = new THREE.BufferGeometry();
+  faceOverlay.geometry.setAttribute('position', new THREE.BufferAttribute(arr, 3));
+  faceEdges.geometry.dispose();
+  faceEdges.geometry = new THREE.BufferGeometry();
+  faceEdges.geometry.setAttribute('position', new THREE.BufferAttribute(lines, 3));
+}
+function syncFaceOverlayMatrix() {
+  if (!faceOverlay.visible) return;
+  const m = state.faceSel.rec.mesh;
+  m.updateWorldMatrix(true, false);
+  faceOverlay.matrix.copy(m.matrixWorld);
+  faceEdges.matrix.copy(m.matrixWorld);
+  faceOverlay.matrixWorldNeedsUpdate = faceEdges.matrixWorldNeedsUpdate = true;
+  faceOverlay.visible = faceEdges.visible = m.visible;
+}
+
+function setFaceSelection(rec, tris, how = 'set') {
+  let fs = state.faceSel;
+  if (!fs || fs.rec !== rec) fs = state.faceSel = { rec, set: new Set(), materials: null };
+  if (how === 'set') fs.set = new Set(tris);
+  else if (how === 'add') tris.forEach((t) => fs.set.add(t));
+  else if (how === 'remove') tris.forEach((t) => fs.set.delete(t));
+  fs.materials = null; // a new selection gets its own materials on the next edit
+  afterFaceSelectionChange();
+}
+function clearFaceSelection() {
+  if (state.faceSel) { state.faceSel.set = new Set(); state.faceSel.materials = null; }
+  afterFaceSelectionChange();
+}
+function afterFaceSelectionChange() {
+  refreshFaceOverlay();
+  updateFacePanel();
+  updateMaterialScopeLabel();
+  syncMaterialSliders();
+  syncTextureControls();
+  renderTexLibrary();
+}
+
+function updateFacePanel() {
+  const panel = $('face-panel');
+  panel.classList.toggle('hidden', state.tool !== 'faces');
+  document.querySelectorAll('.face-mode-btn').forEach((b) => {
+    const on = b.dataset.fmode === faceMode;
+    b.classList.toggle('bg-secondary-container/40', on);
+    b.classList.toggle('text-secondary', on);
+    b.classList.toggle('text-on-surface-variant', !on);
+  });
+  $('face-angle-row').classList.toggle('opacity-40', faceMode !== 'flat');
+  const fs = state.faceSel;
+  const n = fs && state.meshes.includes(fs.rec) ? fs.set.size : 0;
+  $('face-count').textContent = n
+    ? `${fmtInt(n)} triangle${n !== 1 ? 's' : ''} selected on ${fs.rec.mesh.name}`
+    : 'Click a face on any part';
+}
+
+function updateMaterialScopeLabel() {
+  const fs = state.faceSel;
+  const label = faceActive() ? `${fmtInt(fs.set.size)} face${fs.set.size !== 1 ? 's' : ''} of ${fs.rec.mesh.name}` :
+    (state.scope ? (state.scope.name || scopeKind()) : 'Whole Scene');
+  $('mat-scope-label').textContent = label;
+  $('mat-scope-label').title = label;
+  $('mat-scope-label').classList.toggle('text-secondary', faceActive());
+}
+
+function onFaceClick(e, hit) {
+  const rec = hit ? recOf(hit.object) : null;
+  const how = e.shiftKey ? 'add' : e.altKey ? 'remove' : 'set';
+  if (!rec) { if (how === 'set') clearFaceSelection(); return; }
+  if (!rec.editable) return toast('Faces of animated (skinned) parts can’t be selected.', 'warn', 4000);
+  if (hit.faceIndex == null) return;
+  if (state.scope !== rec.mesh) setScope(rec.mesh);
+  const tris = floodFaces(rec.mesh.geometry, hit.faceIndex, faceMode);
+  setFaceSelection(rec, tris, state.faceSel && state.faceSel.rec !== rec ? 'set' : how);
+}
+
+function faceGrow() {
+  const fs = state.faceSel;
+  if (!faceActive()) return toast('Select some faces first.', 'info', 2500);
+  const a = adjacencyOf(fs.rec.mesh.geometry);
+  const add = [];
+  for (const t of fs.set) for (let j = a.start[t]; j < a.start[t + 1]; j++) add.push(a.list[j]);
+  setFaceSelection(fs.rec, add, 'add');
+}
+function faceAll(invert) {
+  const fs = state.faceSel;
+  const rec = fs && state.meshes.includes(fs.rec) ? fs.rec : recOf(state.scope);
+  if (!rec || !rec.editable) return toast('Click a face on a part first (or select a part in the Outliner).', 'info', 3500);
+  const tc = triCountOf(rec.mesh.geometry);
+  const cur = fs && fs.rec === rec ? fs.set : new Set();
+  const out = [];
+  for (let t = 0; t < tc; t++) if (!invert || !cur.has(t)) out.push(t);
+  setFaceSelection(rec, out, 'set');
+}
+
+// Material index of every triangle (from geometry groups; 0 when there are none)
+function triMaterials(g) {
+  const tc = triCountOf(g);
+  const out = new Int32Array(tc);
+  if (g.groups && g.groups.length) {
+    out.fill(-1);
+    for (const grp of g.groups) {
+      const a = Math.floor(grp.start / 3), b = Math.min(tc, Math.floor((grp.start + grp.count) / 3));
+      for (let t = a; t < b; t++) out[t] = grp.materialIndex || 0;
+    }
+  }
+  return out;
+}
+
+// Per-triangle material index for a part (a single material covers every triangle)
+function recTriMaterials(rec) {
+  const tm = triMaterials(rec.mesh.geometry);
+  if (!Array.isArray(rec.baseMaterial)) tm.fill(0);
+  return tm;
+}
+
+// Rebuild a mesh so triangles are grouped by material. Triangles with keep[t] === 0 are dropped.
+// Unused materials are removed. Returns the old→new triangle map (-1 = dropped).
+function rebuildByMaterial(rec, triMat, mats, keep) {
+  const g = rec.mesh.geometry, tc = triCountOf(g), tv = triVerts(g);
+  const used = [...new Set(Array.from(triMat).filter((m, t) => m >= 0 && (!keep || keep[t])))].sort((x, y) => x - y);
+  const newOf = new Map(used.map((m, i) => [m, i]));
+  const order = [];
+  for (const m of used) for (let t = 0; t < tc; t++) if (triMat[t] === m && (!keep || keep[t])) order.push(t);
+  const idx = new Uint32Array(order.length * 3);
+  const remap = new Int32Array(tc).fill(-1);
+  const groups = [];
+  let w = 0;
+  order.forEach((t, i) => {
+    remap[t] = i;
+    idx[w++] = tv(t, 0); idx[w++] = tv(t, 1); idx[w++] = tv(t, 2);
+    const mi = newOf.get(triMat[t]);
+    const last = groups[groups.length - 1];
+    if (last && last.materialIndex === mi) last.count += 3;
+    else groups.push({ start: i * 3, count: 3, materialIndex: mi });
+  });
+  const ng = new THREE.BufferGeometry();
+  for (const k of Object.keys(g.attributes)) ng.setAttribute(k, g.attributes[k]); // attributes are never edited in place
+  for (const k of Object.keys(g.morphAttributes)) ng.morphAttributes[k] = g.morphAttributes[k];
+  ng.setIndex(new THREE.BufferAttribute(idx, 1));
+  const newMats = used.map((m) => mats[m]);
+  if (newMats.length > 1) groups.forEach((gr) => ng.addGroup(gr.start, gr.count, gr.materialIndex));
+  rec.mesh.geometry = ng;
+  rec.baseline = ng;
+  rec.pct = 100;
+  rec.baseMaterial = newMats.length > 1 ? newMats : newMats[0];
+  return remap;
+}
+
+// Give the selected faces their own material(s), once per selection, and return them
+function faceMaterials() {
+  if (!faceActive()) return null;
+  const fs = state.faceSel;
+  if (fs.materials) return fs.materials;
+  const rec = fs.rec, g = rec.mesh.geometry;
+  const mats = [].concat(rec.baseMaterial).slice();
+  const triMat = recTriMaterials(rec);
+  const total = new Map(), sel = new Map();
+  triMat.forEach((m) => total.set(m, (total.get(m) || 0) + 1));
+  for (const t of fs.set) sel.set(triMat[t], (sel.get(triMat[t]) || 0) + 1);
+  const usedElsewhere = new Set();
+  for (const r of state.meshes) if (r !== rec) [].concat(r.baseMaterial).forEach((m) => usedElsewhere.add(m));
+  const targets = [];
+  for (const [m, n] of sel) {
+    const src = mats[m] || mats[0];
+    if (n === total.get(m) && mats.indexOf(src) === m && !usedElsewhere.has(src) && mats.filter((x) => x === src).length === 1) {
+      targets.push(src); // every face with this material is selected — edit it in place
+    } else {
+      const c = cloneMaterial(src);
+      c.name = (src && src.name ? src.name : 'material') + '_faces';
+      mats.push(c);
+      const k = mats.length - 1;
+      for (const t of fs.set) if (triMat[t] === m) triMat[t] = k;
+      targets.push(c);
+    }
+  }
+  const remap = rebuildByMaterial(rec, triMat, mats);
+  fs.set = new Set([...fs.set].map((t) => remap[t]).filter((t) => t >= 0));
+  fs.materials = targets;
+  setViewMode(state.viewMode);
+  refreshFaceOverlay();
+  return targets;
+}
+
+// Material shown in the Color & Material controls while faces are selected
+function faceDisplayMaterial() {
+  if (!faceActive()) return null;
+  const fs = state.faceSel;
+  if (fs.materials) return fs.materials[0];
+  const mats = [].concat(fs.rec.baseMaterial);
+  const t = fs.set.values().next().value;
+  return mats[recTriMaterials(fs.rec)[t]] || mats[0];
+}
+
+function deleteSelectedFaces() {
+  const fs = state.faceSel;
+  if (!faceActive()) return;
+  const tc = triCountOf(fs.rec.mesh.geometry);
+  if (fs.set.size >= tc) return toast('That’s every face of this part — switch to another tool and delete the part instead.', 'warn', 5000);
+  const keep = new Uint8Array(tc).fill(1);
+  for (const t of fs.set) keep[t] = 0;
+  const n = fs.set.size;
+  rebuildByMaterial(fs.rec, recTriMaterials(fs.rec), [].concat(fs.rec.baseMaterial), keep);
+  setViewMode(state.viewMode);
+  clearFaceSelection();
+  refreshStats();
+  updateSelBox();
+  pushHistory();
+  toast(`Deleted ${fmtInt(n)} face${n !== 1 ? 's' : ''}. Ctrl+Z to undo.`, 'success', 3000);
+}
+
+/* ------------------------------------------------------------------ */
 /* Textures & images                                                   */
 /* ------------------------------------------------------------------ */
 
@@ -2622,6 +3009,7 @@ function dropModelTextures() {
 // Texture objects (by image) used by the current selection
 function scopeMapSources() {
   const set = new Set();
+  if (faceActive()) { scopeMaps().forEach((t) => set.add(t.source)); return set; }
   for (const r of scopeRecs()) for (const m of [].concat(r.baseMaterial)) if (m && m.map) set.add(m.map.source);
   return set;
 }
@@ -2669,6 +3057,7 @@ function revealTexturesPanel() {
 
 function onTextureClick(e) {
   texActive = e;
+  if (faceActive()) return applyTexture(e);
   if (!state.modelRoot) {
     renderTexLibrary();
     return toast('Preview only — add a shape or load a model, then select it and click a texture to apply it. Or click <b>Place</b> to put this picture in the scene.', 'info', 5500);
@@ -2703,15 +3092,16 @@ function boxProjectUVs(src) {
 function applyTexture(e) {
   if (!e) return;
   if (!state.modelRoot) return toast('The scene is empty — add a shape or load a model first.', 'warn');
-  const recs = scopeRecs().filter((r) => !r.isPoints);
+  const recs = faceActive() ? [state.faceSel.rec] : scopeRecs().filter((r) => !r.isPoints);
   if (!recs.length) return toast('Nothing in the selection can show a texture (point clouds can’t).', 'warn');
   let projected = 0;
   for (const rec of recs) {
     if (rec.mesh.geometry.getAttribute('uv')) continue;
-    const g = boxProjectUVs(rec.mesh.geometry);
+    const g = boxProjectUVs(rec.mesh.geometry); // same triangle order, so a face selection stays valid
     rec.mesh.geometry = g; rec.baseline = g; rec.pct = 100;
     projected++;
   }
+  if (projected && faceActive()) refreshFaceOverlay();
   const tex = e.texture.clone(); // one shared layout for the whole selection
   tex.repeat.set(1, 1); tex.offset.set(0, 0); tex.rotation = 0; tex.center.set(0.5, 0.5);
   tex.needsUpdate = true;
@@ -2729,7 +3119,7 @@ function applyTexture(e) {
   syncTextureControls();
   renderTexLibrary();
   pushHistory();
-  toast(`Applied <b>${escapeHTML(e.name)}</b> to <b>${escapeHTML(scopeName())}</b>.` +
+  toast(`Applied <b>${escapeHTML(e.name)}</b> to <b>${escapeHTML(faceActive() ? $('mat-scope-label').textContent : scopeName())}</b>.` +
     (projected ? ` ${projected} part${projected > 1 ? 's' : ''} had no texture coordinates, so a simple box projection was added (works best on boxy shapes).` : '') +
     ' Adjust Tiling / Rotation / Shift below; the Color picker tints it.', 'success', 6000);
 }
@@ -2763,6 +3153,15 @@ function addImageToScene(e) {
 
 // Make the selection's textures independent of identical texture objects used elsewhere (e.g. glTF shares them)
 function makeScopeMapsUnique() {
+  const fm = faceMaterials();
+  if (fm) {
+    // the selected faces' textures must not be shared with any other material
+    const mine = new Set(fm);
+    const others = new Set();
+    for (const r of state.meshes) for (const m of [].concat(r.baseMaterial)) if (m && !mine.has(m) && m.map) others.add(m.map);
+    for (const m of fm) if (m && m.map && others.has(m.map)) { m.map = m.map.clone(); m.needsUpdate = true; }
+    return;
+  }
   makeScopeMaterialsUnique();
   const inside = new Set(scopeRecs());
   const outside = new Set();
@@ -2778,6 +3177,11 @@ function makeScopeMapsUnique() {
 
 function scopeMaps() {
   const maps = new Set();
+  if (faceActive()) {
+    const ms = state.faceSel.materials || [faceDisplayMaterial()];
+    ms.forEach((m) => m && m.map && maps.add(m.map));
+    return [...maps];
+  }
   for (const r of scopeRecs()) for (const m of [].concat(r.baseMaterial)) if (m && m.map) maps.add(m.map);
   return [...maps];
 }
@@ -2958,6 +3362,7 @@ function tick(t) {
   if (dt > 0 && dt < 1000) { fpsAccum += dt; fpsFrames++; }
   controls.update();
   if (state.scope && selHelper.visible) selBox.setFromObject(state.scope);
+  syncFaceOverlayMatrix();
   renderer.render(scene, activeCam);
   renderGizmo();
 }
@@ -3037,6 +3442,13 @@ $('btn-decimate').addEventListener('click', opDecimate);
 $('btn-mirror').addEventListener('click', opMirror);
 $('btn-normals').addEventListener('click', opSmoothNormals);
 $('btn-split').addEventListener('click', opSplit);
+// Face selection panel
+document.querySelectorAll('.face-mode-btn').forEach((b) => b.addEventListener('click', () => { faceMode = b.dataset.fmode; updateFacePanel(); }));
+$('face-angle').addEventListener('input', (e) => { faceAngle = Number(e.target.value); $('face-angle-val').textContent = faceAngle + '°'; });
+$('face-grow').addEventListener('click', faceGrow);
+$('face-all').addEventListener('click', () => faceAll(false));
+$('face-invert').addEventListener('click', () => faceAll(true));
+$('face-clear').addEventListener('click', clearFaceSelection);
 // Add Shape menu
 const shapePop = $('shape-popover');
 $('btn-add-shape').addEventListener('click', (e) => { e.stopPropagation(); shapePop.classList.toggle('hidden'); });
@@ -3280,15 +3692,17 @@ window.addEventListener('keydown', (e) => {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   switch (e.key.toLowerCase()) {
     case 'v': setTool('select'); break;
+    case 'p': setTool('faces'); break;
     case 'g': setTool('move'); break;
     case 'r': setTool('rotate'); break;
     case 's': setTool('scale'); break;
     case 'f': frameCamera(false); break;
     case 'h': toggleVisibility(); break;
     case 'delete':
-    case 'backspace': e.preventDefault(); opDelete(); break;
+    case 'backspace': e.preventDefault(); if (state.tool === 'faces') deleteSelectedFaces(); else opDelete(); break;
     case 'escape':
       if (!$('shape-popover').classList.contains('hidden')) $('shape-popover').classList.add('hidden');
+      else if (state.tool === 'faces') { if (faceActive()) clearFaceSelection(); else setTool('select'); }
       else if (document.body.classList.contains('preview-mode')) setPreview(false);
       else if (state.scope) {
         const top = topObjectOf(state.scope);
@@ -3318,6 +3732,7 @@ syncMaterialSliders();
 syncPolySliderUI();
 updatePresetChips();
 updatePartButtons();
+updateFacePanel();
 updateDownloadLabel();
 renderTexLibrary();
 syncTextureControls();
@@ -3333,6 +3748,7 @@ window.aether3d = {
   downloadOriginal,
   setViewMode,
   setTool,
+  camera: () => activeCam,
   version: APP_VERSION,
   three: THREE.REVISION,
 };
