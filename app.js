@@ -31,7 +31,7 @@ import { unzipSync, zipSync, strToU8, strFromU8 } from 'three/addons/libs/fflate
 
 // App version — shown in the header. Rules: +0.1 for a small feature update, +1 for a revamp or
 // major feature update, and a letter suffix (b, c, d…) for bug-fix-only releases of the same version.
-const APP_VERSION = 'v1.3';
+const APP_VERSION = 'v2.0';
 
 const THREE_CDN = 'https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/';
 const GH_MODELS = 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r170/examples/models/';
@@ -231,6 +231,8 @@ function updateCamButtons() {
   };
   setActive(p, state.camType === 'persp');
   setActive(o, state.camType === 'ortho');
+  const ml = $('mobile-camtoggle-label');
+  if (ml) ml.textContent = state.camType === 'persp' ? 'PERSP' : 'ORTHO';
 }
 
 // Transform gizmo
@@ -631,6 +633,8 @@ async function handleFiles(fileList) {
   if (strayBlend) {
     toast(`<b>${escapeHTML(strayBlend.name)}</b> (.blend) can’t be opened in-browser — loaded <b>${escapeHTML(primary.name)}</b> instead. To open the .blend, export it as GLB/OBJ from Blender (or use the bundled <b>blend2glb.py</b> script) first.`, 'warn', 9000);
   }
+  if (isMobileLayout() && (files.zipSource || primary).size > 80 * 1048576 &&
+      !window.confirm(`${(files.zipSource || primary).name} is ${fmtBytes((files.zipSource || primary).size)}. Very large models can make a phone's browser run out of memory and reload the page. Load it anyway?`)) return;
   setLoading(true, `Loading ${primary.name}…`);
   setStatus('Loading…', true);
 
@@ -987,6 +991,7 @@ function updateHeaderMeta() {
 }
 
 function refreshStats() {
+  if (typeof updateMobileInfo === 'function') updateMobileInfo();
   const s = modelStats();
   $('stat-tris-card').textContent = fmtInt(s.tris);
   $('stat-verts-card').textContent = fmtInt(s.verts);
@@ -1048,6 +1053,19 @@ function buildOutliner() {
     row.appendChild(main);
     if (node) {
       main.addEventListener('dblclick', (e) => { e.preventDefault(); renamePart(node); });
+      // touch: press and hold to rename
+      let holdTimer = null, held = false;
+      main.addEventListener('pointerdown', (e) => {
+        if (e.pointerType === 'mouse') return;
+        held = false;
+        holdTimer = setTimeout(() => { held = true; renamePart(node); }, 550);
+      });
+      const cancelHold = () => { clearTimeout(holdTimer); holdTimer = null; };
+      main.addEventListener('pointerup', cancelHold);
+      main.addEventListener('pointerleave', cancelHold);
+      main.addEventListener('pointercancel', cancelHold);
+      main.addEventListener('contextmenu', (e) => { e.preventDefault(); if (!held) { cancelHold(); renamePart(node); } });
+      main.addEventListener('click', (e) => { if (held) { e.stopImmediatePropagation(); held = false; } }, true);
       const mk = (ic, tip, fn, extra = '') => {
         const b = document.createElement('button');
         b.type = 'button';
@@ -1220,7 +1238,9 @@ function setTool(tool, force) {
     renderTexLibrary();
     if (tool === 'faces' && !faceHintShown && state.modelRoot) {
       faceHintShown = true;
-      toast('<b>Faces</b>: click a face to select it (Shift adds, Alt removes). <b>Flat area</b> picks a whole side at once. Then change Color, Material presets or Textures in the Inspector — only those faces change.', 'info', 9000);
+      toast(isMobileLayout()
+        ? '<b>Faces</b>: tap a face to select it — use <b>+ Add</b> / <b>− Remove</b> in the panel to build up a selection. <b>Flat area</b> picks a whole side at once. Then use the <b>Materials</b> tab — only those faces change.'
+        : '<b>Faces</b>: click a face to select it (Shift adds, Alt removes). <b>Flat area</b> picks a whole side at once. Then change Color, Material presets or Textures in the Inspector — only those faces change.', 'info', 9000);
     }
   }
   document.querySelectorAll('.transform-tool-btn').forEach((b) => {
@@ -1244,6 +1264,7 @@ function attachGizmo() {
 }
 
 function syncTransformInputs() {
+  if (typeof updateMobileInfo === 'function') updateMobileInfo();
   const r = transformTarget();
   if (!r) return;
   $('pos-x').value = r.position.x.toFixed(2);
@@ -2276,7 +2297,7 @@ function saveBlob(blob, name) {
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 }
 
-async function doExport() {
+async function doExport(opts = {}) {
   if (!state.modelRoot) { toast('Load a model first — drop a file or pick a sample.', 'warn'); return; }
   if (state.viewMode !== 'pbr') {
     setViewMode('pbr'); // export must carry the real materials, not the wire/matcap/xray display override
@@ -2317,7 +2338,11 @@ async function doExport() {
     } else {
       throw new Error('Unknown format');
     }
-    if (blob) {
+    if (blob && opts.share) {
+      label.textContent = 'Sharing…';
+      const shared = await shareBlob(blob, name);
+      label.textContent = shared ? 'Shared!' : 'Export Ready!';
+    } else if (blob) {
       saveBlob(blob, name);
       label.textContent = 'Export Ready!';
       toast(`Exported <b>${escapeHTML(name)}</b> (${fmtBytes(blob.size)}) — all edits baked in. Check your downloads.`, 'success', 5000);
@@ -2330,6 +2355,23 @@ async function doExport() {
     btn.disabled = false;
     setTimeout(updateDownloadLabel, 1200);
   }
+}
+
+// Send a file through the phone's share sheet; falls back to a normal download
+async function shareBlob(blob, name) {
+  try {
+    const file = new File([blob], name, { type: blob.type || 'application/octet-stream' });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title: name });
+      return true;
+    }
+  } catch (e) {
+    if (e && e.name === 'AbortError') return false; // user closed the share sheet
+    console.warn('[Online3D] share failed, downloading instead:', e);
+  }
+  saveBlob(blob, name);
+  toast(`Sharing isn’t available here — <b>${escapeHTML(name)}</b> was downloaded instead.`, 'info', 4500);
+  return false;
 }
 
 /* ---------- OBJ + MTL + textures, zipped ----------
@@ -2487,7 +2529,9 @@ function updateDownloadLabel() {
   const fmt = state.exportFormat;
   const zip = fmt === 'obj' && $('chk-obj-zip').checked;
   $('obj-zip-row').classList.toggle('hidden', fmt !== 'obj');
-  $('btn-download-label').textContent = `Download Model (${zip ? 'OBJ .zip' : fmt.toUpperCase()})`;
+  $('btn-download-label').textContent = document.body.classList.contains('mobile')
+    ? `Export ${zip ? 'OBJ .zip' : fmt.toUpperCase()}`
+    : `Download Model (${zip ? 'OBJ .zip' : fmt.toUpperCase()})`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2559,6 +2603,7 @@ function typicalSize() {
 // materials, created on the first edit; reset whenever the selection changes)
 state.faceSel = null;
 let faceMode = 'flat';
+let faceClickMode = 'set'; // what a plain click does: set / add / remove (Shift / Alt override on a computer)
 let faceAngle = 15;
 let faceHintShown = false;
 const adjCache = new WeakMap(); // geometry -> { start, list, normals, triCount }
@@ -2718,6 +2763,12 @@ function updateFacePanel() {
     b.classList.toggle('text-on-surface-variant', !on);
   });
   $('face-angle-row').classList.toggle('opacity-40', faceMode !== 'flat');
+  document.querySelectorAll('.face-click-btn').forEach((b) => {
+    const on = b.dataset.fclick === faceClickMode;
+    b.classList.toggle('bg-primary-container/40', on);
+    b.classList.toggle('text-primary', on);
+    b.classList.toggle('text-on-surface-variant', !on);
+  });
   const fs = state.faceSel;
   const n = fs && state.meshes.includes(fs.rec) ? fs.set.size : 0;
   $('face-count').textContent = n
@@ -2736,7 +2787,7 @@ function updateMaterialScopeLabel() {
 
 function onFaceClick(e, hit) {
   const rec = hit ? recOf(hit.object) : null;
-  const how = e.shiftKey ? 'add' : e.altKey ? 'remove' : 'set';
+  const how = e.shiftKey ? 'add' : e.altKey ? 'remove' : faceClickMode;
   if (!rec) { if (how === 'set') clearFaceSelection(); return; }
   if (!rec.editable) return toast('Faces of animated (skinned) parts can’t be selected.', 'warn', 4000);
   if (hit.faceIndex == null) return;
@@ -3051,6 +3102,7 @@ function renderTexPreview() {
 }
 
 function revealTexturesPanel() {
+  if (isMobileLayout()) { openSheetTab('materials'); return; }
   if (typeof setPanel === 'function' && !ui.right) setPanel('right', true);
   if (typeof setSection === 'function' && ui.sections.textures) { setSection('textures', false); saveUI(); }
 }
@@ -3714,6 +3766,177 @@ window.addEventListener('keydown', (e) => {
 });
 
 /* ------------------------------------------------------------------ */
+/* Mobile layout                                                       */
+/* ------------------------------------------------------------------ */
+// Phones (and small touch tablets) get a different layout: the 3D view on top and a bottom sheet with
+// tabs. The desktop panels' sections are *moved* into the sheet (not copied), so every control keeps
+// working the same way; switching back puts them where they were.
+
+const isTouch = matchMedia('(pointer: coarse)').matches;
+const autoMobileMQ = matchMedia('(max-width: 767px), (pointer: coarse) and (max-width: 1023px)');
+function isMobileLayout() {
+  const mode = (typeof ui !== 'undefined' && ui.layout) || 'auto';
+  return mode === 'mobile' || (mode === 'auto' && autoMobileMQ.matches);
+}
+
+const MOVES = [ // [element, mobile destination]
+  () => [$('transform-bar'), $('sheet-tools')],
+  () => [$('sec-transform'), document.querySelector('[data-pane="transform"]')],
+  () => [$('sec-material'), document.querySelector('[data-pane="materials"]')],
+  () => [$('sec-textures'), document.querySelector('[data-pane="materials"]')],
+  () => [$('sec-geometry'), document.querySelector('[data-pane="mesh"]')],
+  () => [$('model-card'), document.querySelector('[data-pane="scene"]')],
+  () => [$('outliner-list').previousElementSibling, document.querySelector('[data-pane="scene"]')],
+  () => [$('outliner-list'), document.querySelector('[data-pane="scene"]')],
+  () => [$('btn-download-original'), document.querySelector('[data-pane="scene"]')],
+  () => [$('export-dock'), $('sheet-export')],
+];
+let movedHome = null; // [{el, parent, next}] while in the mobile layout
+let sheetState = 'half';
+let sheetTab = 'transform';
+
+function applyLayout() {
+  const mobile = isMobileLayout();
+  if (mobile && !movedHome) {
+    movedHome = [];
+    for (const f of MOVES) {
+      const [el, dest] = f();
+      if (!el || !dest) continue;
+      movedHome.push({ el, parent: el.parentNode, next: el.nextSibling });
+      dest.appendChild(el);
+    }
+  } else if (!mobile && movedHome) {
+    for (const m of movedHome.reverse()) m.parent.insertBefore(m.el, m.next && m.next.parentNode === m.parent ? m.next : null);
+    movedHome = null;
+  }
+  document.body.classList.toggle('mobile', mobile);
+  $('mobile-menu').classList.add('hidden');
+  document.querySelectorAll('.mm-item[data-act="layout"]').forEach((b) => b.classList.toggle('active', b.dataset.layout === ((ui && ui.layout) || 'auto')));
+  tc.setSize(isTouch || mobile ? 1.35 : 0.9);
+  updateDownloadLabel();
+  if (mobile) { setSheetTab(sheetTab, false); setSheet(sheetState); }
+  setTimeout(resize, 30);
+}
+
+// ---- bottom sheet: three heights, drag the handle (or the tab bar) to resize ----
+const sheet = $('mobile-sheet');
+function sheetHeights() {
+  const total = $('viewport-height').clientHeight || window.innerHeight;
+  const peek = $('sheet-handle').offsetHeight + $('sheet-tools').offsetHeight + $('sheet-tabs').offsetHeight + 12;
+  return { collapsed: peek, half: Math.max(peek, Math.round(total * 0.58)), full: Math.max(peek, Math.round(total * 0.86)) };
+}
+function setSheet(stateName) {
+  sheetState = stateName;
+  sheet.style.height = sheetHeights()[stateName] + 'px';
+  $('sheet-content').classList.toggle('invisible', stateName === 'collapsed');
+}
+function setSheetTab(tab, open = true) {
+  sheetTab = tab;
+  document.querySelectorAll('.sheet-tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
+  document.querySelectorAll('.sheet-pane').forEach((p) => p.classList.toggle('hidden', p.dataset.pane !== tab));
+  if (open && sheetState === 'collapsed') setSheet('half');
+}
+function openSheetTab(tab) { setSheetTab(tab); if (sheetState === 'collapsed') setSheet('half'); }
+
+let sheetDrag = null;
+function sheetPointerDown(e) {
+  sheetDrag = { y: e.clientY, h: sheet.offsetHeight, moved: false, id: e.pointerId, target: e.currentTarget };
+}
+window.addEventListener('pointermove', (e) => {
+  if (!sheetDrag || e.pointerId !== sheetDrag.id) return;
+  const dy = sheetDrag.y - e.clientY;
+  if (!sheetDrag.moved && Math.abs(dy) < 8) return;
+  if (!sheetDrag.moved) { sheetDrag.moved = true; sheet.classList.add('dragging'); $('sheet-content').classList.remove('invisible'); }
+  const hs = sheetHeights();
+  sheet.style.height = clamp(sheetDrag.h + dy, hs.collapsed, Math.round(($('viewport-height').clientHeight || innerHeight) * 0.9)) + 'px';
+});
+window.addEventListener('pointerup', (e) => {
+  if (!sheetDrag || e.pointerId !== sheetDrag.id) return;
+  const d = sheetDrag;
+  sheetDrag = null;
+  if (!d.moved) return;
+  sheet.classList.remove('dragging');
+  const h = sheet.offsetHeight, hs = sheetHeights();
+  const best = Object.entries(hs).sort((a, b) => Math.abs(a[1] - h) - Math.abs(b[1] - h))[0][0];
+  setSheet(best);
+  // a drag that started on a tab mustn't also count as a tap on it
+  const swallow = (ev) => { ev.stopPropagation(); ev.preventDefault(); };
+  window.addEventListener('click', swallow, { capture: true, once: true });
+  setTimeout(() => window.removeEventListener('click', swallow, { capture: true }), 50);
+});
+$('sheet-handle').addEventListener('pointerdown', sheetPointerDown);
+$('sheet-tabs').addEventListener('pointerdown', sheetPointerDown);
+$('sheet-handle').addEventListener('click', () => setSheet(sheetState === 'collapsed' ? 'half' : sheetState === 'half' ? 'full' : 'collapsed'));
+document.querySelectorAll('.sheet-tab').forEach((b) => b.addEventListener('click', () => {
+  if (b.dataset.tab === sheetTab && sheetState !== 'collapsed') return setSheet('collapsed'); // tap the open tab again to fold
+  setSheetTab(b.dataset.tab);
+}));
+window.addEventListener('resize', () => { if (document.body.classList.contains('mobile')) setSheet(sheetState); });
+
+// ---- ☰ menu ----
+const mMenu = $('mobile-menu');
+$('btn-mobile-menu').addEventListener('click', (e) => { e.stopPropagation(); mMenu.classList.toggle('hidden'); });
+document.addEventListener('click', (e) => { if (!mMenu.contains(e.target) && !e.target.closest('#btn-mobile-menu')) mMenu.classList.add('hidden'); });
+mMenu.addEventListener('click', (e) => {
+  const b = e.target.closest('.mm-item');
+  if (!b) return;
+  e.stopPropagation(); // don't let the page-wide "close popovers" handler undo what this item opens
+  mMenu.classList.add('hidden');
+  const act = b.dataset.act;
+  if (act === 'import') fileInput.click();
+  else if (act === 'add') { $('shape-popover').classList.remove('hidden'); }
+  else if (act === 'new') $('nav-new').click();
+  else if (act === 'sample') loadSample(b.dataset.sample);
+  else if (act === 'preview') setPreview(true);
+  else if (act === 'grid') $('btn-toggle-grid').click();
+  else if (act === 'light') { setLightPreset((Math.max(state.lightPreset, 0) + 1) % LIGHT_PRESETS.length); toast(`Lighting: <b>${LIGHT_PRESETS[state.lightPreset].name}</b>`, 'info', 1800); }
+  else if (act === 'layout') { ui.layout = b.dataset.layout; saveUI(); applyLayout(); toast(`Layout: <b>${b.textContent.trim()}</b>`, 'info', 2000); }
+});
+autoMobileMQ.addEventListener('change', applyLayout);
+
+// ---- 3D-view overlays ----
+$('mobile-camtoggle').addEventListener('click', () => setCamType(state.camType === 'persp' ? 'ortho' : 'persp'));
+$('mobile-import').addEventListener('click', () => fileInput.click());
+const fmtDim = (v) => (v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2));
+function updateMobileInfo() {
+  const dims = $('mobile-dims'), tris = $('mobile-tris');
+  if (!dims) return;
+  if (!state.modelRoot) { dims.textContent = '—'; tris.textContent = 'empty scene'; return; }
+  const target = state.scope || state.modelRoot;
+  const b = new THREE.Box3().setFromObject(target);
+  const sz = b.isEmpty() ? new THREE.Vector3() : b.getSize(new THREE.Vector3());
+  dims.textContent = `${fmtDim(sz.x)} × ${fmtDim(sz.y)} × ${fmtDim(sz.z)} units`;
+  const st = scopeStats();
+  const parts = scopeRecs().length;
+  tris.textContent = `${fmtK(st.tris)} tris • ${parts} part${parts !== 1 ? 's' : ''}${state.scope ? ' • ' + (state.scope.name || '') : ''}`;
+}
+
+// ---- +/− steppers for the number boxes (touch-friendly) ----
+const STEPS = { pos: () => { const t = transformTarget(); const b = t && new THREE.Box3().setFromObject(t); return b && !b.isEmpty() ? Math.max(+(b.getSize(new THREE.Vector3()).length() * 0.05).toPrecision(1), 0.01) : 0.1; }, rot: () => 15, scl: () => 0.1 };
+for (const id of ['pos-x', 'pos-y', 'pos-z', 'rot-x', 'rot-y', 'rot-z', 'scl-x', 'scl-y', 'scl-z']) {
+  const inp = $(id), wrap = inp.parentElement, kind = id.slice(0, 3);
+  const box = document.createElement('div');
+  box.className = 'stepper-btn flex-col shrink-0 border-l border-white/5';
+  box.innerHTML = '<button type="button" class="px-2 py-0.5 text-on-surface-variant active:bg-surface-container-high" data-d="1">+</button><button type="button" class="px-2 py-0.5 text-on-surface-variant active:bg-surface-container-high" data-d="-1">−</button>';
+  box.addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b || !transformTarget()) return;
+    const cur = parseFloat(String(inp.value).replace(/[^0-9.eE+-]/g, '')) || 0;
+    inp.value = +(cur + Number(b.dataset.d) * STEPS[kind]()).toFixed(4);
+    commitTransformFromInputs();
+  });
+  wrap.appendChild(box);
+}
+
+// ---- face-select click mode, share, touch file pickers ----
+document.querySelectorAll('.face-click-btn').forEach((b) => b.addEventListener('click', () => { faceClickMode = b.dataset.fclick; updateFacePanel(); }));
+const canShareFiles = (() => { try { return !!(navigator.canShare && navigator.canShare({ files: [new File(['x'], 'x.txt', { type: 'text/plain' })] })); } catch (e) { return false; } })();
+$('btn-share').classList.toggle('share-off', !canShareFiles);
+$('btn-share').addEventListener('click', () => doExport({ share: true }));
+// Phone file pickers can grey out unfamiliar types (.obj, .fbx, .glb…); our own checks reject wrong files anyway
+if (isTouch) fileInput.removeAttribute('accept');
+
+/* ------------------------------------------------------------------ */
 /* Boot                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -3733,6 +3956,8 @@ syncPolySliderUI();
 updatePresetChips();
 updatePartButtons();
 updateFacePanel();
+applyLayout();
+updateMobileInfo();
 updateDownloadLabel();
 renderTexLibrary();
 syncTextureControls();

@@ -30,6 +30,70 @@
   .panel-head .panel-chevron { transition: transform .15s ease; }
   .panel-head.collapsed .panel-chevron { transform: rotate(-90deg); }
   #transform-bar-scroll { scroll-behavior:smooth; }
+  /* ---------- Desktop / mobile layouts ---------- */
+  .mobile-only { display: none !important; }
+  body.mobile .mobile-only { display: flex !important; }
+  body.mobile .desktop-only { display: none !important; }
+  .mm-item { display:flex; align-items:center; gap:.6rem; width:100%; padding:.6rem .6rem; border-radius:.5rem; text-align:left; font-size:14px; color:#e3e1e9; }
+  .mm-item:hover, .mm-item:active { background:#292a2f; }
+  .mm-item .material-symbols-outlined { font-size:20px; color:#4cd7f6; }
+  .mm-item.active { background:#292a2f; color:#d0bcff; }
+  .mm-label { padding:.6rem .6rem .2rem; font: 500 10px/14px "JetBrains Mono", monospace; letter-spacing:.06em; text-transform:uppercase; color:#958ea0; }
+  #mobile-menu:not(.hidden) { display:flex; }
+  body.mobile #app-header, body.mobile #app-header > div { height: 3rem; }
+  body.mobile #app-header > div { padding-left: .5rem; padding-right: .5rem; }
+  body.mobile #app-header img[alt$="logo"] { height: 1.5rem; }
+  body.mobile #app-header .text-headline-md { font-size: 16px; }
+  body.mobile #btn-header-export, body.mobile #btn-toggle-grid, body.mobile #profile-img, body.mobile #btn-simple-edit,
+  body.mobile #btn-quick-preview, body.mobile #left-aside, body.mobile #right-dock, body.mobile #drop-tray,
+  body.mobile #gizmo-canvas, body.mobile .light-preset-btn, body.mobile #top-hud .cam-switch,
+  body.mobile .panel-toggle-btn, body.mobile #quickcam-strip .strip-divider, body.mobile .nav-mode-btn[data-nav="zoom"],
+  body.mobile .panel-head .panel-chevron, body.mobile #btn-collapse-all-sections { display: none !important; }
+  body.mobile #top-hud > div:last-child { display: none !important; }
+  body.mobile #undo-group { display: flex !important; }
+  body.mobile #app-shell { padding-left: 0 !important; }
+  body.mobile #app-main { padding-top: 3rem !important; min-height: 0; }
+  body.mobile #viewport-height { height: calc(100dvh - 3rem) !important; }
+  body.mobile #workspace { flex-direction: column; }
+  body.mobile #viewport-canvas-container { flex: 1 1 auto; min-height: 120px; }
+  body.mobile #top-hud { top: .5rem; left: .5rem; right: .5rem; }
+  body.mobile .viewmode-btn { padding: .3rem .55rem; }
+  body.mobile .viewmode-btn .material-symbols-outlined { display:none; }
+  body.mobile #quickcam-strip { left: auto; right: .5rem; top: 3.25rem; }
+  body.mobile #toast-container { top: 3rem; left: .5rem; right: .5rem; width: auto; max-width: none; align-items: stretch; }
+  body.mobile #toast-container > div { max-width: none; }
+  body.mobile #transform-bar { position: relative; left: auto; bottom: auto; transform: none; max-width: 100%; }
+  body.mobile #transform-bar-scroll { border-radius: .75rem; box-shadow: none; }
+  body.mobile #mobile-sheet .panel-head { pointer-events: none; }
+  body.mobile #mobile-sheet .panel-body.collapsed { display: flex !important; }
+  body.mobile #mobile-sheet input[type="text"] { font-size: 16px; } /* stops iPhone zooming into fields */
+  body.mobile #mobile-sheet .mat-swatch { width: 1.9rem; height: 1.9rem; }
+  body.mobile #mobile-sheet input[type="range"] { height: .5rem; }
+  body.mobile #outliner-list > div > button { padding-top: .65rem; padding-bottom: .65rem; }
+  body.mobile #export-dock { padding: .5rem .75rem; gap: .4rem; background: transparent; border-top: 1px solid rgba(255,255,255,.08); }
+  body.mobile #export-dock .panel-head, body.mobile #export-dock [data-section-body="export"] > div:first-child > div:first-child { display: none !important; }
+  body.mobile #export-dock [data-section-body="export"] { flex-direction: row; flex-wrap: wrap; align-items: center; gap: .4rem; }
+  body.mobile #export-dock [data-section-body="export"] > div:first-child { flex: 0 0 auto; width: 9.75rem; }
+  body.mobile #export-dock .export-format-btn[data-fmt="fbx"] { display: none; }
+  body.mobile #export-dock .grid-cols-4 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  body.mobile #export-dock .export-format-btn { padding-top: .45rem; padding-bottom: .45rem; }
+  body.mobile #btn-download { flex: 1 1 0; width: auto; padding: .55rem .5rem; font-size: 13px; border-radius: .75rem; }
+  body.mobile #btn-share { flex: 0 0 auto; width: auto; padding: .55rem .65rem; border-radius: .75rem; }
+  body.mobile #btn-share > span:last-child { display: none; }
+  body.mobile #obj-zip-row { order: 5; width: 100%; }
+  body.mobile #obj-zip-row .block { display: none; }
+  body.mobile #btn-share:not(.share-off) { display: flex; }
+  body.mobile.preview-mode #mobile-sheet, body.mobile.preview-mode .mobile-overlay { display: none !important; }
+  body.mobile.preview-mode #viewport-height { height: 100dvh !important; }
+  #mobile-sheet { transition: height .18s ease; }
+  #mobile-sheet.dragging { transition: none; }
+  @media (max-width: 380px) { .sheet-tab .material-symbols-outlined { display: none; } }
+  .sheet-tab.active { background: #292a2f; color: #e3e1e9; }
+  .stepper-btn { display:none; }
+  body.mobile .stepper-btn { display:flex; }
+  @media (hover: none) {
+    #outliner-list .opacity-0 { opacity: 1 !important; }
+  }
   #viewport-canvas-container.drop-active { box-shadow: inset 0 0 0 3px rgba(208,188,255,.65); }
 </style>
 <script type="importmap">
@@ -40,9 +104,9 @@
   }
 }
 </script>
-</head><body class="bg-surface-container-lowest text-on-surface font-body-md text-body-md select-none"><header id="app-header" class="fixed top-0 left-0 right-0 z-50 h-16 bg-surface-container-low/90 backdrop-blur-xl shadow-[0_1px_16px_rgba(0,0,0,0.45)]"><div class="h-16 w-full px-gutter-lg flex items-center justify-between gap-space-md"><div class="flex items-center gap-space-lg shrink-0"><div class="flex items-center gap-space-sm"><img alt="Online 3D Studio logo" class="h-8 w-auto object-contain" src="https://lh3.googleusercontent.com/aida/ALJJyrBNnk7NhFjBte_An_ILiYg2b_TghLPC32oKbG1bWd2u6_ptC-xtxkwr_9Q1rGN_DshBm1KHyI42yYiLGwOixVNpOFXLYz-d12dSXuLOSGNL4gvsIj1Nvd3UjMy7VHokOEq45vDicZ7kROvElA6S8wOZI4YL7KR8Qjhinvro7QDyGxBzHlEey-qwroW0-hwbsWeEGfFctsHqivMoPLk2WKySGUvpY5yU-aYvpfztCD5q"/><span class="font-headline-md text-headline-md font-bold tracking-tight text-on-surface whitespace-nowrap">Online 3D Studio</span><span class="px-space-xs py-0.5 rounded bg-surface-container-highest text-secondary font-label-sm text-label-sm uppercase tracking-wider" id="app-version">v1.1</span></div><nav class="hidden xl:flex items-center gap-space-xs" data-active-classes="bg-surface-container-high text-on-surface font-medium"><button class="px-space-sm py-1.5 rounded text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface transition-colors font-body-sm text-body-sm" id="nav-import" type="button">Import / Drop</button><button aria-current="page" class="px-space-sm py-1.5 rounded transition-colors bg-surface-container-high text-on-surface font-medium" id="nav-new" type="button">New Scene</button><div class="relative"><button class="px-space-sm py-1.5 rounded text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface transition-colors font-body-sm text-body-sm" id="nav-samples" type="button">Open Sample</button><div class="hidden absolute left-0 top-full mt-2 w-72 p-1.5 rounded-xl bg-surface-container-low/95 backdrop-blur-xl ring-1 ring-white/10 shadow-2xl z-50" id="sample-popover"><div class="px-2 py-1 font-label-sm text-label-sm uppercase tracking-wider text-on-surface-variant">Sample Models</div><button class="sample-item w-full flex items-center gap-space-sm px-2 py-2 rounded-lg text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface transition-colors text-left" data-sample="torus" type="button"><span class="material-symbols-outlined text-lg text-secondary">donut_large</span><span class="flex-1"><span class="block font-body-sm text-body-sm text-on-surface">Torus Knot</span><span class="block font-label-sm text-label-sm text-outline">Procedural • works offline</span></span></button><button class="sample-item w-full flex items-center gap-space-sm px-2 py-2 rounded-lg text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface transition-colors text-left" data-sample="helmet" type="button"><span class="material-symbols-outlined text-lg text-tertiary">sports_motorsports</span><span class="flex-1"><span class="block font-body-sm text-body-sm text-on-surface">Damaged Helmet</span><span class="block font-label-sm text-label-sm text-outline">glTF • PBR textures</span></span></button><button class="sample-item w-full flex items-center gap-space-sm px-2 py-2 rounded-lg text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface transition-colors text-left" data-sample="male02" type="button"><span class="material-symbols-outlined text-lg text-primary">person</span><span class="flex-1"><span class="block font-body-sm text-body-sm text-on-surface">Retro Man</span><span class="block font-label-sm text-label-sm text-outline">OBJ + MTL + textures</span></span></button><button class="sample-item w-full flex items-center gap-space-sm px-2 py-2 rounded-lg text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface transition-colors text-left" data-sample="samba" type="button"><span class="material-symbols-outlined text-lg text-secondary">emoji_people</span><span class="flex-1"><span class="block font-body-sm text-body-sm text-on-surface">Samba Dancer</span><span class="block font-label-sm text-label-sm text-outline">FBX • shows FBX pipeline</span></span></button><button class="sample-item w-full flex items-center gap-space-sm px-2 py-2 rounded-lg text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface transition-colors text-left" data-sample="lucy" type="button"><span class="material-symbols-outlined text-lg text-outline">face</span><span class="flex-1"><span class="block font-body-sm text-body-sm text-on-surface">Lucy Scan</span><span class="block font-label-sm text-label-sm text-outline">PLY • 100k vertices</span></span></button></div></div></nav></div><div class="hidden md:flex items-center gap-space-sm px-space-md py-1.5 rounded bg-surface-container-lowest/80 shadow-[inset_0_1px_2px_rgba(0,0,0,0.6)]"><span class="w-2 h-2 rounded-full bg-secondary shadow-[0_0_8px_#4cd7f6]"></span><span class="font-label-md text-label-md text-on-surface font-medium truncate max-w-xs lg:max-w-md" id="header-file-name">no_model_loaded</span><span class="font-label-sm text-label-sm text-on-surface-variant" id="header-file-meta">Drop a 3D file — nothing is uploaded</span><span class="px-space-xs py-0.5 rounded bg-secondary-container/20 text-secondary font-label-sm text-label-sm" id="header-file-status">Idle</span></div><div class="flex items-center gap-space-sm shrink-0"><button class="hidden lg:flex items-center gap-space-xs px-space-sm py-1.5 rounded bg-surface-container hover:bg-surface-container-high text-on-surface-variant hover:text-on-surface transition-colors font-body-sm text-body-sm" id="btn-quick-preview" title="Distraction-free fullscreen viewport (Esc to exit)" type="button"><span class="material-symbols-outlined text-sm">visibility</span><span>Quick Preview</span></button><div class="hidden sm:flex items-center bg-surface-container rounded"><button class="p-1.5 text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high rounded transition-colors disabled:opacity-30 disabled:pointer-events-none" id="btn-undo" title="Undo (Ctrl+Z)" type="button"><span class="material-symbols-outlined text-base">undo</span></button><button class="p-1.5 text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high rounded transition-colors disabled:opacity-30 disabled:pointer-events-none" id="btn-redo" title="Redo (Ctrl+Shift+Z)" type="button"><span class="material-symbols-outlined text-base">redo</span></button></div><button class="hidden sm:block px-space-sm py-1.5 rounded bg-surface-container text-on-surface-variant hover:bg-surface-container-high transition-colors font-body-sm text-body-sm" id="btn-simple-edit" title="Show / hide the right-hand Inspector panel" type="button">Inspector</button><div class="flex items-center"><button class="flex items-center gap-space-xs px-space-md py-1.5 rounded bg-primary-container text-on-primary-container font-headline-md text-body-sm font-medium hover:bg-primary transition-all shadow-[0_0_16px_rgba(160,120,255,0.4)]" id="btn-header-export" type="button"><span class="material-symbols-outlined text-base">download</span><span id="btn-header-export-label">Export</span><span class="material-symbols-outlined text-sm">arrow_drop_down</span></button></div><div class="flex items-center gap-space-xs pl-space-xs"><button class="p-1 text-on-surface-variant hover:text-on-surface hover:bg-surface-container rounded transition-colors" id="btn-toggle-grid" title="Toggle grid" type="button"><span class="material-symbols-outlined text-lg">tune</span></button><img alt="Profile" class="w-8 h-8 rounded-full object-cover shadow-[0_0_0_1px_rgba(208,188,255,0.3)]" src="https://lh3.googleusercontent.com/aida-public/AB6AXuCaMyaTzIN2GgU3LYya6ZoFz7CL2Zgz3OnLH2epW8coRpHo7xqmzhnGFMnzst1Cz0RukH_3A-iDDmAejZen7mWMEV8jGLWSTXGjzcNdBUSDsEl7b5ljWDhmGPtV1lnX58t55JDthKuiTIccAlBxrRploaNuGLbhzwB_-Wf-zmNc9_PKl9XZDPLyvNn0VAvVTpDnsrLWMZWBoML5qzagakFjHJZfBhPE0zSeq1KifK0"/></div></div></div></header><aside id="left-aside" class="fixed left-0 top-16 bottom-0 w-64 bg-surface-container-low/75 backdrop-blur-xl z-40 flex flex-col gap-space-md p-space-md"><div class="flex flex-col gap-space-sm flex-1 min-h-0"><div class="flex items-center justify-between px-space-sm text-on-surface-variant font-label-sm text-label-sm uppercase tracking-wider"><span class="flex items-center gap-1"><span class="material-symbols-outlined text-base text-outline">account_tree</span>Studio Outliner</span><button class="p-1 rounded text-outline hover:text-on-surface hover:bg-surface-container-high transition-colors" id="btn-collapse-left" title="Hide the outliner panel (reopen from the left toolbar in the viewport)" type="button"><span class="material-symbols-outlined text-base">left_panel_close</span></button></div><p class="px-space-sm font-label-sm text-[10px] text-outline normal-case leading-snug">Click an object to select it — click again for one of its parts. <span class="material-symbols-outlined text-[11px] align-middle">visibility</span> hide · <span class="material-symbols-outlined text-[11px] align-middle">delete</span> delete · double-click to rename.</p><nav class="flex flex-col gap-space-xs overflow-y-auto flex-1 min-h-0 pr-1" id="outliner-list"></nav></div><div class="rounded bg-surface-container-lowest/90 flex flex-col shrink-0"><button class="panel-head w-full flex items-center justify-between px-space-sm pt-space-sm pb-space-xs text-on-surface-variant font-label-sm text-label-sm" data-section="stats" type="button"><span class="flex items-center gap-1"><span class="material-symbols-outlined panel-chevron text-sm">expand_more</span>Scene Geometry</span><span class="text-secondary font-label-sm text-label-sm" id="geom-label">0 tris</span></button><div class="panel-body flex flex-col gap-space-xs px-space-sm pb-space-sm" data-section-body="stats"><div class="w-full h-1 bg-surface-container-highest rounded-full overflow-hidden"><div class="bg-secondary h-full rounded-full transition-all" id="geom-bar" style="width:0%"></div></div><div class="flex justify-between items-center pt-space-xs text-outline font-label-sm text-label-sm"><span id="stat-fps">FPS: —</span><span id="stat-engine">Engine: WebGL2</span></div><div class="flex justify-between items-center text-outline font-label-sm text-label-sm"><span id="stat-calls">Draw calls: —</span><span id="stat-textures">Tex: —</span></div></div></div></aside><div class="pl-64" id="app-shell"><main id="app-main" class="relative pt-16 min-h-screen bg-surface-container-lowest"><div class="flex flex-col w-full h-[calc(100vh-4rem)] overflow-hidden" id="viewport-height">
+</head><body class="bg-surface-container-lowest text-on-surface font-body-md text-body-md select-none"><header id="app-header" class="fixed top-0 left-0 right-0 z-50 h-16 bg-surface-container-low/90 backdrop-blur-xl shadow-[0_1px_16px_rgba(0,0,0,0.45)]"><div class="h-16 w-full px-gutter-lg flex items-center justify-between gap-space-md"><div class="flex items-center gap-space-lg shrink-0"><div class="flex items-center gap-space-sm"><img alt="Online 3D Studio logo" class="h-8 w-auto object-contain" src="https://lh3.googleusercontent.com/aida/ALJJyrBNnk7NhFjBte_An_ILiYg2b_TghLPC32oKbG1bWd2u6_ptC-xtxkwr_9Q1rGN_DshBm1KHyI42yYiLGwOixVNpOFXLYz-d12dSXuLOSGNL4gvsIj1Nvd3UjMy7VHokOEq45vDicZ7kROvElA6S8wOZI4YL7KR8Qjhinvro7QDyGxBzHlEey-qwroW0-hwbsWeEGfFctsHqivMoPLk2WKySGUvpY5yU-aYvpfztCD5q"/><span class="font-headline-md text-headline-md font-bold tracking-tight text-on-surface whitespace-nowrap">Online 3D Studio</span><span class="px-space-xs py-0.5 rounded bg-surface-container-highest text-secondary font-label-sm text-label-sm uppercase tracking-wider" id="app-version">v1.1</span></div><nav class="hidden xl:flex items-center gap-space-xs" data-active-classes="bg-surface-container-high text-on-surface font-medium"><button class="px-space-sm py-1.5 rounded text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface transition-colors font-body-sm text-body-sm" id="nav-import" type="button">Import / Drop</button><button aria-current="page" class="px-space-sm py-1.5 rounded transition-colors bg-surface-container-high text-on-surface font-medium" id="nav-new" type="button">New Scene</button><div class="relative"><button class="px-space-sm py-1.5 rounded text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface transition-colors font-body-sm text-body-sm" id="nav-samples" type="button">Open Sample</button><div class="hidden absolute left-0 top-full mt-2 w-72 p-1.5 rounded-xl bg-surface-container-low/95 backdrop-blur-xl ring-1 ring-white/10 shadow-2xl z-50" id="sample-popover"><div class="px-2 py-1 font-label-sm text-label-sm uppercase tracking-wider text-on-surface-variant">Sample Models</div><button class="sample-item w-full flex items-center gap-space-sm px-2 py-2 rounded-lg text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface transition-colors text-left" data-sample="torus" type="button"><span class="material-symbols-outlined text-lg text-secondary">donut_large</span><span class="flex-1"><span class="block font-body-sm text-body-sm text-on-surface">Torus Knot</span><span class="block font-label-sm text-label-sm text-outline">Procedural • works offline</span></span></button><button class="sample-item w-full flex items-center gap-space-sm px-2 py-2 rounded-lg text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface transition-colors text-left" data-sample="helmet" type="button"><span class="material-symbols-outlined text-lg text-tertiary">sports_motorsports</span><span class="flex-1"><span class="block font-body-sm text-body-sm text-on-surface">Damaged Helmet</span><span class="block font-label-sm text-label-sm text-outline">glTF • PBR textures</span></span></button><button class="sample-item w-full flex items-center gap-space-sm px-2 py-2 rounded-lg text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface transition-colors text-left" data-sample="male02" type="button"><span class="material-symbols-outlined text-lg text-primary">person</span><span class="flex-1"><span class="block font-body-sm text-body-sm text-on-surface">Retro Man</span><span class="block font-label-sm text-label-sm text-outline">OBJ + MTL + textures</span></span></button><button class="sample-item w-full flex items-center gap-space-sm px-2 py-2 rounded-lg text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface transition-colors text-left" data-sample="samba" type="button"><span class="material-symbols-outlined text-lg text-secondary">emoji_people</span><span class="flex-1"><span class="block font-body-sm text-body-sm text-on-surface">Samba Dancer</span><span class="block font-label-sm text-label-sm text-outline">FBX • shows FBX pipeline</span></span></button><button class="sample-item w-full flex items-center gap-space-sm px-2 py-2 rounded-lg text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface transition-colors text-left" data-sample="lucy" type="button"><span class="material-symbols-outlined text-lg text-outline">face</span><span class="flex-1"><span class="block font-body-sm text-body-sm text-on-surface">Lucy Scan</span><span class="block font-label-sm text-label-sm text-outline">PLY • 100k vertices</span></span></button></div></div></nav></div><div class="hidden md:flex items-center gap-space-sm px-space-md py-1.5 rounded bg-surface-container-lowest/80 shadow-[inset_0_1px_2px_rgba(0,0,0,0.6)]"><span class="w-2 h-2 rounded-full bg-secondary shadow-[0_0_8px_#4cd7f6]"></span><span class="font-label-md text-label-md text-on-surface font-medium truncate max-w-xs lg:max-w-md" id="header-file-name">no_model_loaded</span><span class="font-label-sm text-label-sm text-on-surface-variant" id="header-file-meta">Drop a 3D file — nothing is uploaded</span><span class="px-space-xs py-0.5 rounded bg-secondary-container/20 text-secondary font-label-sm text-label-sm" id="header-file-status">Idle</span></div><div class="flex items-center gap-space-sm shrink-0" id="header-actions"><div class="relative mobile-only" id="mobile-menu-wrap"><button class="p-2 rounded-lg bg-surface-container text-on-surface hover:bg-surface-container-high transition-colors flex items-center" id="btn-mobile-menu" title="Menu" type="button"><span class="material-symbols-outlined text-xl">menu</span></button><div class="hidden absolute right-0 top-full mt-2 w-64 max-h-[75dvh] overflow-y-auto p-1.5 rounded-xl bg-surface-container-low/95 backdrop-blur-xl ring-1 ring-white/10 shadow-2xl z-[70] flex-col" id="mobile-menu"><button class="mm-item" data-act="import" type="button"><span class="material-symbols-outlined">upload_file</span>Import model / zip</button><button class="mm-item" data-act="add" type="button"><span class="material-symbols-outlined">add_box</span>Add shape or image</button><button class="mm-item" data-act="new" type="button"><span class="material-symbols-outlined">note_add</span>New scene</button><div class="mm-label">Samples</div><button class="mm-item" data-act="sample" data-sample="torus" type="button"><span class="material-symbols-outlined">donut_large</span>Torus Knot (offline)</button><button class="mm-item" data-act="sample" data-sample="helmet" type="button"><span class="material-symbols-outlined">sports_motorsports</span>Damaged Helmet</button><button class="mm-item" data-act="sample" data-sample="male02" type="button"><span class="material-symbols-outlined">person</span>Retro Man (OBJ)</button><button class="mm-item" data-act="sample" data-sample="samba" type="button"><span class="material-symbols-outlined">emoji_people</span>Samba Dancer (FBX)</button><div class="mm-label">View</div><button class="mm-item" data-act="preview" type="button"><span class="material-symbols-outlined">fullscreen</span>Full-screen view</button><button class="mm-item" data-act="grid" type="button"><span class="material-symbols-outlined">grid_on</span>Show / hide grid</button><button class="mm-item" data-act="light" type="button"><span class="material-symbols-outlined">wb_incandescent</span>Next lighting preset</button><div class="mm-label">Layout</div><button class="mm-item" data-act="layout" data-layout="auto" type="button"><span class="material-symbols-outlined">devices</span>Automatic</button><button class="mm-item" data-act="layout" data-layout="desktop" type="button"><span class="material-symbols-outlined">desktop_windows</span>Desktop layout</button><button class="mm-item" data-act="layout" data-layout="mobile" type="button"><span class="material-symbols-outlined">smartphone</span>Mobile layout</button></div></div><button class="hidden lg:flex items-center gap-space-xs px-space-sm py-1.5 rounded bg-surface-container hover:bg-surface-container-high text-on-surface-variant hover:text-on-surface transition-colors font-body-sm text-body-sm" id="btn-quick-preview" title="Distraction-free fullscreen viewport (Esc to exit)" type="button"><span class="material-symbols-outlined text-sm">visibility</span><span>Quick Preview</span></button><div class="hidden sm:flex items-center bg-surface-container rounded" id="undo-group"><button class="p-1.5 text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high rounded transition-colors disabled:opacity-30 disabled:pointer-events-none" id="btn-undo" title="Undo (Ctrl+Z)" type="button"><span class="material-symbols-outlined text-base">undo</span></button><button class="p-1.5 text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high rounded transition-colors disabled:opacity-30 disabled:pointer-events-none" id="btn-redo" title="Redo (Ctrl+Shift+Z)" type="button"><span class="material-symbols-outlined text-base">redo</span></button></div><button class="hidden sm:block px-space-sm py-1.5 rounded bg-surface-container text-on-surface-variant hover:bg-surface-container-high transition-colors font-body-sm text-body-sm" id="btn-simple-edit" title="Show / hide the right-hand Inspector panel" type="button">Inspector</button><div class="flex items-center"><button class="flex items-center gap-space-xs px-space-md py-1.5 rounded bg-primary-container text-on-primary-container font-headline-md text-body-sm font-medium hover:bg-primary transition-all shadow-[0_0_16px_rgba(160,120,255,0.4)]" id="btn-header-export" type="button"><span class="material-symbols-outlined text-base">download</span><span id="btn-header-export-label">Export</span><span class="material-symbols-outlined text-sm">arrow_drop_down</span></button></div><div class="flex items-center gap-space-xs pl-space-xs"><button class="p-1 text-on-surface-variant hover:text-on-surface hover:bg-surface-container rounded transition-colors" id="btn-toggle-grid" title="Toggle grid" type="button"><span class="material-symbols-outlined text-lg">tune</span></button><img alt="Profile" id="profile-img" class="w-8 h-8 rounded-full object-cover shadow-[0_0_0_1px_rgba(208,188,255,0.3)]" src="https://lh3.googleusercontent.com/aida-public/AB6AXuCaMyaTzIN2GgU3LYya6ZoFz7CL2Zgz3OnLH2epW8coRpHo7xqmzhnGFMnzst1Cz0RukH_3A-iDDmAejZen7mWMEV8jGLWSTXGjzcNdBUSDsEl7b5ljWDhmGPtV1lnX58t55JDthKuiTIccAlBxrRploaNuGLbhzwB_-Wf-zmNc9_PKl9XZDPLyvNn0VAvVTpDnsrLWMZWBoML5qzagakFjHJZfBhPE0zSeq1KifK0"/></div></div></div></header><aside id="left-aside" class="fixed left-0 top-16 bottom-0 w-64 bg-surface-container-low/75 backdrop-blur-xl z-40 flex flex-col gap-space-md p-space-md"><div class="flex flex-col gap-space-sm flex-1 min-h-0"><div class="flex items-center justify-between px-space-sm text-on-surface-variant font-label-sm text-label-sm uppercase tracking-wider"><span class="flex items-center gap-1"><span class="material-symbols-outlined text-base text-outline">account_tree</span>Studio Outliner</span><button class="p-1 rounded text-outline hover:text-on-surface hover:bg-surface-container-high transition-colors" id="btn-collapse-left" title="Hide the outliner panel (reopen from the left toolbar in the viewport)" type="button"><span class="material-symbols-outlined text-base">left_panel_close</span></button></div><p class="px-space-sm font-label-sm text-[10px] text-outline normal-case leading-snug">Click an object to select it — click again for one of its parts. <span class="material-symbols-outlined text-[11px] align-middle">visibility</span> hide · <span class="material-symbols-outlined text-[11px] align-middle">delete</span> delete · double-click (or press and hold) to rename.</p><nav class="flex flex-col gap-space-xs overflow-y-auto flex-1 min-h-0 pr-1" id="outliner-list"></nav></div><div class="rounded bg-surface-container-lowest/90 flex flex-col shrink-0"><button class="panel-head w-full flex items-center justify-between px-space-sm pt-space-sm pb-space-xs text-on-surface-variant font-label-sm text-label-sm" data-section="stats" type="button"><span class="flex items-center gap-1"><span class="material-symbols-outlined panel-chevron text-sm">expand_more</span>Scene Geometry</span><span class="text-secondary font-label-sm text-label-sm" id="geom-label">0 tris</span></button><div class="panel-body flex flex-col gap-space-xs px-space-sm pb-space-sm" data-section-body="stats"><div class="w-full h-1 bg-surface-container-highest rounded-full overflow-hidden"><div class="bg-secondary h-full rounded-full transition-all" id="geom-bar" style="width:0%"></div></div><div class="flex justify-between items-center pt-space-xs text-outline font-label-sm text-label-sm"><span id="stat-fps">FPS: —</span><span id="stat-engine">Engine: WebGL2</span></div><div class="flex justify-between items-center text-outline font-label-sm text-label-sm"><span id="stat-calls">Draw calls: —</span><span id="stat-textures">Tex: —</span></div></div></div></aside><div class="pl-64" id="app-shell"><main id="app-main" class="relative pt-16 min-h-screen bg-surface-container-lowest"><div class="flex flex-col w-full h-[calc(100vh-4rem)] overflow-hidden" id="viewport-height">
 <!-- Master Workspace Layout: Viewport Center with Floating Glass HUDs + Right Inspector Dock -->
-<div class="relative w-full h-full flex overflow-hidden">
+<div class="relative w-full h-full flex overflow-hidden" id="workspace">
 <!-- PRIMARY 3D VIEWPORT (real WebGL canvas) -->
 <div class="relative flex-1 h-full bg-surface-container-lowest overflow-hidden select-none cursor-grab active:cursor-grabbing" id="viewport-canvas-container">
 <canvas id="c3d"></canvas>
@@ -53,7 +117,7 @@
   <div class="flex flex-col items-center gap-3 text-center px-6">
     <div class="w-20 h-20 rounded-2xl bg-surface-container-low/85 ring-1 ring-white/10 flex items-center justify-center shadow-2xl"><span class="material-symbols-outlined text-4xl text-secondary">view_in_ar</span></div>
     <div class="font-headline-lg text-headline-lg text-on-surface">Drop a 3D model to begin</div>
-    <p class="font-body-md text-body-md text-on-surface-variant max-w-md">Drag &amp; drop a file anywhere on this page — or click <b>Import / Drop</b> in the header.<br/>Everything runs <span class="text-secondary font-medium">100% locally in your browser</span>; no server, no upload.</p>
+    <p class="font-body-md text-body-md text-on-surface-variant max-w-md"><span class="desktop-only">Drag &amp; drop a file anywhere on this page — or click <b>Import / Drop</b> in the header.<br/></span><span class="mobile-only inline">Tap <b>Import</b> at the bottom-right of this view to open a model from your phone, or add a shape.<br/></span>Everything runs <span class="text-secondary font-medium">100% locally in your browser</span>; no server, no upload.</p>
     <div class="flex flex-wrap items-center justify-center gap-1.5 pointer-events-auto pt-1">
       <span class="px-1.5 py-0.5 rounded bg-surface-container-high text-outline text-[9px] font-label-sm">OBJ</span>
       <span class="px-1.5 py-0.5 rounded bg-surface-container-high text-outline text-[9px] font-label-sm">FBX</span>
@@ -83,6 +147,13 @@
 </div>
 <!-- TOASTS -->
 <div class="absolute top-20 right-space-lg z-[45] flex flex-col items-end gap-2 pointer-events-none w-full max-w-md" id="toast-container"></div>
+<!-- MOBILE-ONLY VIEWPORT OVERLAYS -->
+<button class="mobile-only mobile-overlay absolute top-2 right-2 z-30 items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-surface-container-low/85 backdrop-blur-xl ring-1 ring-white/10 text-on-surface font-label-md text-label-md" id="mobile-camtoggle" title="Switch between perspective and orthographic camera" type="button"><span class="material-symbols-outlined text-base text-secondary">view_in_ar</span><span id="mobile-camtoggle-label">PERSP</span></button>
+<div class="mobile-only mobile-overlay absolute left-2 bottom-2 z-30 flex-col gap-1 pointer-events-none" id="mobile-info">
+<span class="px-2 py-1 rounded-lg bg-surface-container-low/85 backdrop-blur-xl font-label-sm text-label-sm text-on-surface flex items-center gap-1.5"><span class="material-symbols-outlined text-sm text-tertiary">straighten</span><span id="mobile-dims">—</span></span>
+<span class="px-2 py-1 rounded-lg bg-surface-container-low/85 backdrop-blur-xl font-label-sm text-label-sm text-secondary flex items-center gap-1.5"><span class="w-1.5 h-1.5 rounded-full bg-secondary"></span><span id="mobile-tris">empty scene</span></span>
+</div>
+<button class="mobile-only mobile-overlay absolute right-2 bottom-2 z-30 items-center gap-1.5 px-3 py-2 rounded-full bg-surface-container-low/90 backdrop-blur-xl ring-1 ring-white/10 text-on-surface font-label-md text-label-md" id="mobile-import" title="Open a 3D model, zip or image from your device" type="button"><span class="material-symbols-outlined text-base text-primary">add_circle</span>Import</button>
 <!-- TOP FLOATING HUD: View Modes & Camera & Presets -->
 <div class="absolute top-space-lg left-space-lg right-space-lg flex items-center justify-between pointer-events-none z-30" id="top-hud">
 <!-- Render Shading Mode Selector -->
@@ -97,15 +168,15 @@
 </button>
 <button class="viewmode-btn px-2.5 py-1 rounded-lg bg-primary-container text-on-primary-container shadow-md font-label-md text-label-md font-medium flex items-center gap-1.5" data-mode="pbr" type="button">
 <span class="material-symbols-outlined text-sm" style="font-variation-settings: 'FILL' 1;">light_mode</span>
-<span>PBR Shaded</span>
+<span>Shaded</span>
 </button>
 <button class="viewmode-btn px-2.5 py-1 rounded-lg text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high transition-all font-label-md text-label-md flex items-center gap-1.5" data-mode="xray" type="button">
 <span class="material-symbols-outlined text-sm">opacity</span>
 <span>X-Ray</span>
 </button>
-<div class="h-4 w-px bg-white/10 mx-1"></div>
+<div class="h-4 w-px bg-white/10 mx-1 cam-switch"></div>
 <!-- Camera Projection Switcher -->
-<div class="flex items-center">
+<div class="flex items-center cam-switch">
 <button class="px-2 py-1 rounded-lg text-secondary bg-surface-container-high font-label-sm text-label-sm font-semibold" id="cam-perspective" type="button">PERSP</button>
 <button class="px-2 py-1 rounded-lg text-on-surface-variant hover:text-on-surface font-label-sm text-label-sm" id="cam-ortho" type="button">ORTHO</button>
 </div>
@@ -145,7 +216,7 @@
 <button class="panel-toggle-btn p-2 rounded-lg text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high transition-all" data-panel="tray" title="Show / hide the Drag &amp; Drop box" type="button">
 <span class="material-symbols-outlined text-lg">upload_file</span>
 </button>
-<div class="w-full h-px bg-white/10 my-0.5"></div>
+<div class="w-full h-px bg-white/10 my-0.5 strip-divider"></div>
 <button class="nav-mode-btn p-2 rounded-lg text-secondary bg-surface-container-high transition-all" data-nav="orbit" title="Orbit with left mouse (default)" type="button">
 <span class="material-symbols-outlined text-lg">orbit</span>
 </button>
@@ -216,6 +287,11 @@
 <button class="face-mode-btn px-2 py-1 rounded-md font-label-sm text-label-sm" data-fmode="flat" title="The whole flat (or nearly flat) area around the click — e.g. one side of a cube" type="button">Flat area</button>
 <button class="face-mode-btn px-2 py-1 rounded-md font-label-sm text-label-sm" data-fmode="piece" title="Every face of the connected piece you clicked" type="button">Whole piece</button>
 </div>
+<div class="flex items-center p-0.5 rounded-lg bg-surface-container-lowest" title="What a click does to the selection (on a computer you can also hold Shift to add or Alt to remove)">
+<button class="face-click-btn px-2 py-1 rounded-md font-label-sm text-label-sm" data-fclick="set" type="button">Replace</button>
+<button class="face-click-btn px-2 py-1 rounded-md font-label-sm text-label-sm" data-fclick="add" type="button">+ Add</button>
+<button class="face-click-btn px-2 py-1 rounded-md font-label-sm text-label-sm" data-fclick="remove" type="button">− Remove</button>
+</div>
 <label class="flex items-center gap-1 font-label-sm text-label-sm text-on-surface-variant" id="face-angle-row" title="How much a surface may bend and still count as the same flat area">
 <span>Angle</span>
 <input class="w-20 h-1 accent-secondary" id="face-angle" max="60" min="1" type="range" value="15"/>
@@ -228,7 +304,7 @@
 <button class="px-1.5 py-1 rounded-md bg-surface-container hover:bg-surface-container-high text-on-surface font-label-sm text-label-sm" id="face-clear" title="Deselect all faces (Esc)" type="button">Clear</button>
 </div>
 </div>
-<p class="font-label-sm text-[10px] text-outline leading-snug">Click = select · <b>Shift</b>+click = add · <b>Alt</b>+click = remove. Then use <b>Color &amp; Material</b> or <b>Textures</b> in the Inspector — they now change only the selected faces. <b>Delete</b> removes the faces.</p>
+<p class="font-label-sm text-[10px] text-outline leading-snug desktop-only">Click = select · <b>Shift</b>+click = add · <b>Alt</b>+click = remove. Then use <b>Color &amp; Material</b> or <b>Textures</b> in the Inspector — they now change only the selected faces. <b>Delete</b> removes the faces.</p>
 </div>
 <!-- Add Shape popover (outside the scrolling bar so it isn't clipped) -->
 <div class="hidden absolute bottom-full left-0 mb-2 w-72 p-2 rounded-xl bg-surface-container-low/95 backdrop-blur-xl ring-1 ring-white/10 shadow-2xl z-40" id="shape-popover">
@@ -322,6 +398,26 @@
 </div>
 </div>
 </div>
+<!-- MOBILE BOTTOM SHEET: tools + tabs; the desktop panels' sections are moved in here on phones -->
+<section class="mobile-only relative flex-col shrink-0 bg-surface-container-low border-t border-white/10 shadow-[0_-8px_24px_rgba(0,0,0,0.5)] z-30" id="mobile-sheet" style="height:45%">
+<div class="flex items-center justify-center h-6 shrink-0 touch-none cursor-grab" id="sheet-handle" title="Drag up or down to resize"><div class="w-10 h-1.5 rounded-full bg-white/25"></div></div>
+<div class="px-2 shrink-0" id="sheet-tools"></div>
+<div class="grid grid-cols-4 gap-1 mx-2 mt-1.5 p-1 rounded-xl bg-surface-container-lowest shrink-0 touch-none" id="sheet-tabs">
+<button class="sheet-tab flex items-center justify-center gap-1 py-2 rounded-lg text-on-surface-variant font-label-md text-label-md" data-tab="transform" type="button"><span class="material-symbols-outlined text-base text-primary">transform</span>Transform</button>
+<button class="sheet-tab flex items-center justify-center gap-1 py-2 rounded-lg text-on-surface-variant font-label-md text-label-md" data-tab="materials" type="button"><span class="material-symbols-outlined text-base text-secondary">palette</span>Materials</button>
+<button class="sheet-tab flex items-center justify-center gap-1 py-2 rounded-lg text-on-surface-variant font-label-md text-label-md" data-tab="mesh" type="button"><span class="material-symbols-outlined text-base text-tertiary">polyline</span>Mesh</button>
+<button class="sheet-tab flex items-center justify-center gap-1 py-2 rounded-lg text-on-surface-variant font-label-md text-label-md" data-tab="scene" type="button"><span class="material-symbols-outlined text-base text-on-surface">account_tree</span>Scene</button>
+</div>
+<div class="flex-1 min-h-0 flex flex-col overflow-hidden" id="sheet-content">
+<div class="flex-1 min-h-0 overflow-y-auto px-3 py-2" id="sheet-body">
+<div class="sheet-pane flex flex-col gap-3" data-pane="transform"></div>
+<div class="sheet-pane flex flex-col gap-3" data-pane="materials"></div>
+<div class="sheet-pane flex flex-col gap-3" data-pane="mesh"></div>
+<div class="sheet-pane flex flex-col gap-2" data-pane="scene"></div>
+</div>
+<div class="shrink-0" id="sheet-export"></div>
+</div>
+</section>
 <!-- RIGHT SIDEBAR: EDITORS & MATERIAL TUNER & DOWNLOAD CARD -->
 <aside class="w-80 xl:w-96 h-full bg-surface-container-low/95 backdrop-blur-2xl flex flex-col justify-between shrink-0 shadow-[-4px_0_24px_rgba(0,0,0,0.5)] z-30 overflow-y-auto" id="right-dock">
 <!-- Top Section: Model Quick Info & Coordinates & Mesh Operations -->
@@ -334,7 +430,7 @@
 </div>
 </div>
 <!-- Active Model Badge & Format Status -->
-<div class="p-space-sm rounded-xl bg-surface-container-lowest/80 ring-1 ring-white/10 flex flex-col gap-space-xs">
+<div id="model-card" class="p-space-sm rounded-xl bg-surface-container-lowest/80 ring-1 ring-white/10 flex flex-col gap-space-xs">
 <div class="flex items-center justify-between">
 <div class="flex items-center gap-space-xs min-w-0">
 <span class="w-2.5 h-2.5 rounded-full bg-secondary shadow-[0_0_8px_#4cd7f6] shrink-0"></span>
@@ -358,7 +454,7 @@
 </div>
 </div>
 <!-- 1. Coordinate Transform Numeric Matrix (X, Y, Z) -->
-<div class="flex flex-col gap-space-xs">
+<div class="flex flex-col gap-space-xs" id="sec-transform">
 <div class="flex items-center justify-between text-on-surface-variant font-label-sm text-label-sm uppercase tracking-wider">
 <button class="panel-head flex items-center gap-1 font-semibold text-on-surface min-w-0 uppercase tracking-wider" data-section="transform" type="button">
 <span class="material-symbols-outlined panel-chevron text-sm text-outline">expand_more</span>
@@ -448,7 +544,7 @@
 </div>
 <div class="w-full h-px bg-white/10"></div>
 <!-- 2. Simple Mesh Geometry Modifiers -->
-<div class="flex flex-col gap-space-xs">
+<div class="flex flex-col gap-space-xs" id="sec-geometry">
 <div class="flex items-center justify-between text-on-surface-variant font-label-sm text-label-sm uppercase tracking-wider">
 <button class="panel-head flex items-center gap-1 font-semibold text-on-surface uppercase tracking-wider" data-section="geometry" type="button">
 <span class="material-symbols-outlined panel-chevron text-sm text-outline">expand_more</span>
@@ -485,7 +581,7 @@
 </div>
 <div class="w-full h-px bg-white/10"></div>
 <!-- 3. Material & PBR Aesthetics Editor -->
-<div class="flex flex-col gap-space-xs">
+<div class="flex flex-col gap-space-xs" id="sec-material">
 <div class="flex items-center justify-between text-on-surface-variant font-label-sm text-label-sm uppercase tracking-wider">
 <button class="panel-head flex items-center gap-1 font-semibold text-on-surface uppercase tracking-wider" data-section="material" type="button">
 <span class="material-symbols-outlined panel-chevron text-sm text-outline">expand_more</span>
@@ -574,7 +670,7 @@
 </div>
 <div class="w-full h-px bg-white/10"></div>
 <!-- 4. Textures library -->
-<div class="flex flex-col gap-space-xs">
+<div class="flex flex-col gap-space-xs" id="sec-textures">
 <div class="flex items-center justify-between text-on-surface-variant font-label-sm text-label-sm uppercase tracking-wider">
 <button class="panel-head flex items-center gap-1 font-semibold text-on-surface uppercase tracking-wider" data-section="textures" type="button">
 <span class="material-symbols-outlined panel-chevron text-sm text-outline">expand_more</span>
@@ -639,7 +735,7 @@
 </div>
 </div>
 <!-- BOTTOM EXPORT ACTION DOCK -->
-<div class="p-space-md bg-surface-container/80 border-t border-white/10 flex flex-col gap-space-sm">
+<div id="export-dock" class="p-space-md bg-surface-container/80 border-t border-white/10 flex flex-col gap-space-sm">
 <button class="panel-head flex items-center gap-1 font-semibold text-on-surface font-label-sm text-label-sm uppercase tracking-wider" data-section="export" type="button">
 <span class="material-symbols-outlined panel-chevron text-sm text-outline">expand_more</span>
 <span class="material-symbols-outlined text-sm text-primary">download</span>
@@ -663,11 +759,14 @@
 <input checked class="mt-0.5 accent-primary" id="chk-obj-zip" type="checkbox"/>
 <span class="font-body-sm text-body-sm text-on-surface leading-snug">OBJ as <b>.zip</b> with colors &amp; textures <span class="block font-label-sm text-[10px] text-outline">.obj + .mtl + texture images. Untick for the bare .obj (shape only).</span></span>
 </label>
-<p class="font-label-sm text-label-sm text-outline px-1 leading-relaxed">Exports include your edits and leave out hidden things. Colors &amp; textures are kept by <b>GLB</b> and by the <b>OBJ .zip</b>; <b>STL</b> is shape-only. FBX export isn’t supported in-browser — GLB is the universal alternative.</p>
+<p class="font-label-sm text-label-sm text-outline px-1 leading-relaxed desktop-only">Exports include your edits and leave out hidden things. Colors &amp; textures are kept by <b>GLB</b> and by the <b>OBJ .zip</b>; <b>STL</b> is shape-only. FBX export isn’t supported in-browser — GLB is the universal alternative.</p>
 <!-- Master Download Action Button -->
 <button class="w-full py-2.5 px-4 rounded-xl bg-primary text-on-primary font-headline-md text-body-md font-semibold flex items-center justify-center gap-2 shadow-[0_0_24px_rgba(208,188,255,0.4)] hover:shadow-[0_0_32px_rgba(208,188,255,0.6)] hover:bg-primary-fixed-dim transition-all active:scale-[0.98] disabled:opacity-60" id="btn-download" type="button">
 <span class="material-symbols-outlined text-lg">download</span>
 <span id="btn-download-label">Download Model (OBJ)</span>
+</button>
+<button class="hidden w-full py-2 px-3 rounded-lg bg-surface-container-high hover:bg-surface-bright text-on-surface text-body-sm font-medium items-center justify-center gap-1.5 transition-colors" id="btn-share" title="Export and send the file with your phone's share sheet (Files, AirDrop, Drive, mail…)" type="button">
+<span class="material-symbols-outlined text-base">ios_share</span><span>Share exported file</span>
 </button>
 <button class="w-full py-1.5 px-3 rounded-lg bg-surface-container-high hover:bg-surface-bright text-on-surface text-body-sm font-medium flex items-center justify-center gap-1.5 transition-colors" id="btn-download-original" type="button">
 <span class="material-symbols-outlined text-base text-secondary">history</span>
