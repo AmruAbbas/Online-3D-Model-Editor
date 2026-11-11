@@ -31,7 +31,7 @@ import { unzipSync, zipSync, strToU8, strFromU8 } from 'three/addons/libs/fflate
 
 // App version — shown in the header. Rules: +0.1 for a small feature update, +1 for a revamp or
 // major feature update, and a letter suffix (b, c, d…) for bug-fix-only releases of the same version.
-const APP_VERSION = 'v1.1';
+const APP_VERSION = 'v1.2';
 
 const THREE_CDN = 'https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/';
 const GH_MODELS = 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r170/examples/models/';
@@ -552,6 +552,18 @@ async function handleFiles(fileList) {
   // ---- 2) pick the model and verify its contents match its extension ----
   const candidates = [];
   for (const p of LOAD_PRIORITY) files.filter((f) => extOf(f.name) === p).forEach((f) => candidates.push(f));
+
+  // Only pictures dropped (no model)? They go into the texture library.
+  const images = files.filter((f) => IMAGE_EXT.includes(extOf(f.name)));
+  if (!candidates.length && !files.zipSource && images.length) {
+    const others = files.filter((f) => !images.includes(f) && extOf(f.name) !== 'mtl');
+    const { added, notes } = await importTextureFiles(images);
+    if (added.length) {
+      toast(`Added ${added.length} texture${added.length > 1 ? 's' : ''} to the library (Inspector → <b>Textures &amp; Images</b>)${notes.length ? ' — ' + notes.join(', ') : ''}. Select a part and click a thumbnail to apply it, or click <b>Place</b> to put it in the scene as a picture.`, 'success', 8000);
+    }
+    if (others.length) toast(`Not loaded (unsupported): <b>${escapeHTML(others.map((f) => f.name).join(', '))}</b>.`, 'warn', 6000);
+    return;
+  }
   const problems = [];
   let verified = null;
   for (const f of candidates) {
@@ -697,9 +709,13 @@ function moveWorld(obj, delta) {
   obj.updateMatrixWorld(true);
 }
 
+// Copies also get their own texture *transform* (tiling / rotation / shift); the image itself stays shared.
 function cloneMaterial(m) {
-  if (Array.isArray(m)) return m.map((x) => (x && x.clone ? x.clone() : x));
-  return m && m.clone ? m.clone() : m;
+  if (Array.isArray(m)) return m.map(cloneMaterial);
+  if (!m || !m.clone) return m;
+  const c = m.clone();
+  if (c.map && c.map.isTexture) c.map = c.map.clone();
+  return c;
 }
 
 function recOf(mesh) { return state.meshes.find((r) => r.mesh === mesh) || null; }
@@ -867,6 +883,7 @@ function addToScene(object, format, opts = {}) {
   setScope(opts.select ? object : null);
   refreshStats();
   if (wasEmpty) historyReset(); else pushHistory();
+  collectModelTextures();
   updateEmptyState();
   setStatus('Ready', true);
   // The drop box has done its job — get it out of the way (reopen from the left viewport toolbar)
@@ -912,6 +929,8 @@ function clearModel(updateUI = true) {
     syncTransformInputs();
     $('insp-scope-label').textContent = $('mat-scope-label').textContent = 'Whole Scene';
     updatePartButtons();
+    dropModelTextures();
+    syncTextureControls();
   }
 }
 
@@ -1109,6 +1128,8 @@ function setScope(node) {
   syncPolySliderUI();
   refreshStats();
   updatePartButtons();
+  syncTextureControls();
+  renderTexLibrary();
 }
 
 function updatePartButtons() {
@@ -1341,7 +1362,7 @@ function removeTextures() {
   if (!state.modelRoot) return toast('Load a model first.', 'warn');
   let n = 0;
   eachScopeMaterial((m) => { if (m.map) { m.map = null; m.needsUpdate = true; n++; } });
-  if (n) { if (state.viewMode !== 'pbr') setViewMode('pbr'); pushHistory(); toast(`Removed the color texture from ${scopeName()} — the plain color is now visible.`, 'success', 3000); }
+  if (n) { if (state.viewMode !== 'pbr') setViewMode('pbr'); syncTextureControls(); renderTexLibrary(); pushHistory(); toast(`Removed the color texture from ${scopeName()} — the plain color is now visible.`, 'success', 3000); }
   else toast(`${scopeName()} has no color texture.`, 'info', 2400);
 }
 
@@ -2363,7 +2384,13 @@ async function buildOBJZip(root, baseName) {
     mtl += `d ${fmt(m && m.opacity != null ? m.opacity : 1)}\nillum 2\n`;
     mtl += `Pr ${fmt(rough)}\nPm ${fmt(metal)}\n`;
     if (m) {
-      const kd = await addTex(m.map, n + '_color'); if (kd) mtl += `map_Kd ${kd}\n`;
+      const kd = await addTex(m.map, n + '_color');
+      if (kd) {
+        const t = m.map;
+        const opts = (t.repeat.x !== 1 || t.repeat.y !== 1 ? `-s ${fmt(t.repeat.x)} ${fmt(t.repeat.y)} 1 ` : '') +
+          (t.offset.x || t.offset.y ? `-o ${fmt(t.offset.x)} ${fmt(t.offset.y)} 0 ` : '');
+        mtl += `map_Kd ${opts}${kd}\n`;
+      }
       const nmap = await addTex(m.normalMap, n + '_normal'); if (nmap) mtl += `norm ${nmap}\n`;
       const bump = await addTex(m.bumpMap, n + '_bump'); if (bump) mtl += `map_Bump ${bump}\n`;
       const em = await addTex(m.emissiveMap, n + '_emissive'); if (em) mtl += `map_Ke ${em}\n`;
@@ -2426,8 +2453,27 @@ const SHAPES = {
 function addShape(kind) {
   const def = SHAPES[kind];
   if (!def) return;
-  // Size it like a typical object already in the scene (1 unit in an empty scene):
-  // the median of the objects' largest dimensions — half that next to imported models.
+  const u = typicalSize();
+  const color = SHAPE_COLORS[shapeCount++ % SHAPE_COLORS.length];
+  const mat = new THREE.MeshStandardMaterial({
+    name: def.label.toLowerCase() + '_material', color, roughness: 0.5, metalness: 0.05,
+    side: def.doubleSided ? THREE.DoubleSide : THREE.FrontSide,
+  });
+  const mesh = new THREE.Mesh(def.make(u), mat);
+  try {
+    shapeObjects.add(mesh);
+    addToScene(mesh, 'SHAPE', { name: def.label, place: 'floor', frame: 'ifHidden', select: true });
+  } catch (e) {
+    return toast('Couldn’t add the shape: ' + escapeHTML(e.message || String(e)), 'error');
+  }
+  $('shape-popover').classList.add('hidden');
+  if (state.tool === 'select') setTool('move');
+  toast(`Added a <b>${def.label}</b> — it’s selected: drag the arrows to move it, or use Rotate / Scale and the color controls in the Inspector.`, 'success', 4500);
+}
+
+// Size new things like a typical object already in the scene (1 unit in an empty scene):
+// the median of the objects' largest dimensions — half that next to imported models.
+function typicalSize() {
   let u = 1;
   if (state.modelRoot && state.modelRoot.children.length) {
     const dims = [];
@@ -2444,21 +2490,349 @@ function addShape(kind) {
       u = Math.max(dims[Math.floor(dims.length / 2)] * (anyShape ? 1 : 0.5), 1e-3);
     }
   }
-  const color = SHAPE_COLORS[shapeCount++ % SHAPE_COLORS.length];
-  const mat = new THREE.MeshStandardMaterial({
-    name: def.label.toLowerCase() + '_material', color, roughness: 0.5, metalness: 0.05,
-    side: def.doubleSided ? THREE.DoubleSide : THREE.FrontSide,
+  return u;
+}
+
+/* ------------------------------------------------------------------ */
+/* Textures & images                                                   */
+/* ------------------------------------------------------------------ */
+
+const IMAGE_EXT = ['png', 'jpg', 'jpeg', 'webp'];
+const texLib = [];          // { id, name, texture, w, h, hasAlpha, origin: 'imported'|'model', pngBlob, thumb, from }
+let texActive = null;       // entry shown in the preview box
+let texSeq = 0;
+
+function sniffImage(u8) {
+  if (u8[0] === 0x89 && u8[1] === 0x50 && u8[2] === 0x4e && u8[3] === 0x47) return 'png';
+  if (u8[0] === 0xff && u8[1] === 0xd8 && u8[2] === 0xff) return 'jpeg';
+  if (ascii(u8, 0, 4) === 'RIFF' && ascii(u8, 8, 12) === 'WEBP') return 'webp';
+  return null;
+}
+
+function makeThumb(img, w, h) {
+  const c = document.createElement('canvas');
+  c.width = c.height = 96;
+  const g = c.getContext('2d');
+  const k = Math.min(96 / w, 96 / h);
+  try { g.drawImage(img, (96 - w * k) / 2, (96 - h * k) / 2, w * k, h * k); } catch (e) { return null; }
+  return c.toDataURL('image/png');
+}
+
+/* Validate and decode an image file. JPEG and WebP are converted to PNG (lossless from here on);
+   very large images are scaled down to what the graphics card can handle. */
+async function loadImageFile(file) {
+  const head = await readHead(file, 16);
+  const kind = sniffImage(head);
+  if (!kind) throw new Error('it isn’t a PNG, JPEG or WebP image');
+  let bmp;
+  try { bmp = await createImageBitmap(file); } catch (e) { throw new Error('the image data is damaged and can’t be decoded'); }
+  const max = Math.min(renderer.capabilities.maxTextureSize || 4096, 8192);
+  const k = Math.min(1, max / Math.max(bmp.width, bmp.height));
+  const w = Math.max(1, Math.round(bmp.width * k)), h = Math.max(1, Math.round(bmp.height * k));
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const g = c.getContext('2d');
+  g.drawImage(bmp, 0, 0, w, h);
+  if (bmp.close) bmp.close();
+  // does it use transparency? (sampled on a small copy for speed)
+  let hasAlpha = false;
+  if (kind !== 'jpeg') {
+    const sc = document.createElement('canvas');
+    sc.width = Math.min(w, 256); sc.height = Math.min(h, 256);
+    sc.getContext('2d').drawImage(c, 0, 0, sc.width, sc.height);
+    const d = sc.getContext('2d').getImageData(0, 0, sc.width, sc.height).data;
+    for (let i = 3; i < d.length; i += 4) if (d[i] < 250) { hasAlpha = true; break; }
+  }
+  const pngBlob = kind === 'png' && k === 1 ? file : await new Promise((r) => c.toBlob(r, 'image/png'));
+  if (!pngBlob) throw new Error('it couldn’t be converted to PNG');
+  const url = URL.createObjectURL(pngBlob);
+  const img = new Image();
+  img.src = url;
+  await img.decode();
+  return { img, url, w, h, hasAlpha, kind, scaled: k < 1, pngBlob };
+}
+
+function newTexture(img, name) {
+  const t = new THREE.Texture(img);
+  t.name = name;
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  t.needsUpdate = true;
+  return t;
+}
+
+// Import image files into the library. Returns the new entries; problems are reported in one toast.
+async function importTextureFiles(files) {
+  const added = [], bad = [], notes = [];
+  for (const f of files) {
+    // the same file imported again re-uses its library entry
+    const key = `${f.name}|${f.size}|${f.lastModified}`;
+    const dup = texLib.find((e) => e.key === key);
+    if (dup) { added.push(dup); continue; }
+    try {
+      const r = await loadImageFile(f);
+      const name = baseNameOf(f.name);
+      const entry = {
+        id: ++texSeq, key, name, texture: newTexture(r.img, name), w: r.w, h: r.h, hasAlpha: r.hasAlpha,
+        origin: 'imported', pngBlob: r.pngBlob, url: r.url, thumb: makeThumb(r.img, r.w, r.h), from: r.kind,
+      };
+      texLib.push(entry);
+      added.push(entry);
+      if (r.kind !== 'png') notes.push(`${escapeHTML(f.name)} → PNG`);
+      if (r.scaled) notes.push(`${escapeHTML(f.name)} scaled down to ${r.w}×${r.h}`);
+    } catch (e) {
+      bad.push(`<b>${escapeHTML(f.name)}</b> — ${escapeHTML(e.message)}`);
+    }
+  }
+  if (bad.length) toast(`Not imported: ${bad.join('; ')}.`, 'error', 9000);
+  if (added.length) {
+    texActive = added[added.length - 1];
+    renderTexLibrary();
+    revealTexturesPanel();
+  }
+  return { added, notes };
+}
+
+// Textures that came inside loaded models also appear in the library
+function collectModelTextures() {
+  const known = new Set(texLib.map((e) => e.texture.source));
+  for (const rec of state.meshes) {
+    for (const m of [].concat(rec.baseMaterial)) {
+      const t = m && m.map;
+      if (!t || !t.image || known.has(t.source)) continue;
+      const w = t.image.width || 0, h = t.image.height || 0;
+      if (!w || !h) continue;
+      const thumb = makeThumb(t.image, w, h);
+      if (!thumb) continue;
+      known.add(t.source);
+      texLib.push({ id: ++texSeq, name: t.name || (m.name ? m.name + '_texture' : 'model_texture'), texture: t, w, h,
+        hasAlpha: !!m.transparent, origin: 'model', thumb, from: 'model' });
+    }
+  }
+  renderTexLibrary();
+}
+
+function dropModelTextures() {
+  for (let i = texLib.length - 1; i >= 0; i--) if (texLib[i].origin === 'model') texLib.splice(i, 1);
+  if (texActive && !texLib.includes(texActive)) texActive = null;
+  renderTexLibrary();
+}
+
+// Texture objects (by image) used by the current selection
+function scopeMapSources() {
+  const set = new Set();
+  for (const r of scopeRecs()) for (const m of [].concat(r.baseMaterial)) if (m && m.map) set.add(m.map.source);
+  return set;
+}
+
+function renderTexLibrary() {
+  const grid = $('tex-grid');
+  if (!grid) return;
+  $('tex-count').textContent = String(texLib.length);
+  grid.innerHTML = '';
+  if (!texLib.length) {
+    grid.innerHTML = '<div class="col-span-4 py-3 text-center font-label-sm text-[10px] text-outline rounded-lg border border-dashed border-white/10">No textures yet — import some, or drop image files anywhere on the page</div>';
+  }
+  const inUse = state.modelRoot ? scopeMapSources() : new Set();
+  for (const e of texLib) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    const used = inUse.has(e.texture.source);
+    b.className = `relative aspect-square rounded-lg overflow-hidden bg-[repeating-conic-gradient(#2a2b31_0_25%,#1a1b21_0_50%)] bg-[length:10px_10px] ring-2 transition-all ${e === texActive ? 'ring-primary' : used ? 'ring-secondary/80' : 'ring-transparent hover:ring-white/30'}`;
+    b.title = `${e.name} — ${e.w}×${e.h}${e.origin === 'model' ? ' (from your model)' : ''}${used ? ' · used by the selection' : ''}\nClick: preview, and apply to the selected part / object`;
+    b.innerHTML = `<img alt="" class="w-full h-full object-contain" src="${e.thumb}"/>` +
+      (used ? '<span class="absolute top-0.5 right-0.5 w-2 h-2 rounded-full bg-secondary shadow"></span>' : '') +
+      (e.origin === 'model' ? '<span class="absolute bottom-0 left-0 right-0 text-[8px] leading-3 bg-black/60 text-white/80 text-center">model</span>' : '');
+    b.addEventListener('click', () => onTextureClick(e));
+    grid.appendChild(b);
+  }
+  renderTexPreview();
+}
+
+function renderTexPreview() {
+  const box = $('tex-preview');
+  const e = texActive && texLib.includes(texActive) ? texActive : null;
+  box.classList.toggle('hidden', !e);
+  if (!e) return;
+  $('tex-preview-img').src = e.thumb;
+  $('tex-preview-name').textContent = e.name;
+  $('tex-preview-name').title = e.name;
+  const src = e.origin === 'model' ? 'from your model' : e.from === 'png' ? 'PNG' : `${e.from.toUpperCase()} → converted to PNG`;
+  $('tex-preview-meta').textContent = `${e.w}×${e.h} • ${src}${e.hasAlpha ? ' • has transparency' : ''}`;
+}
+
+function revealTexturesPanel() {
+  if (typeof setPanel === 'function' && !ui.right) setPanel('right', true);
+  if (typeof setSection === 'function' && ui.sections.textures) { setSection('textures', false); saveUI(); }
+}
+
+function onTextureClick(e) {
+  texActive = e;
+  if (!state.modelRoot) {
+    renderTexLibrary();
+    return toast('Preview only — add a shape or load a model, then select it and click a texture to apply it. Or click <b>Place</b> to put this picture in the scene.', 'info', 5500);
+  }
+  if (!state.scope) {
+    renderTexLibrary();
+    return toast('Select a part or object first (click it in the viewport or Outliner), then click the texture. To cover <b>everything</b>, click <b>Apply</b> in the preview box.', 'info', 6000);
+  }
+  applyTexture(e);
+}
+
+// Give meshes that have no texture coordinates a simple box projection, so a texture can show
+function boxProjectUVs(src) {
+  const g = src.clone();
+  if (!g.getAttribute('normal')) g.computeVertexNormals();
+  const pos = g.getAttribute('position'), nor = g.getAttribute('normal');
+  g.computeBoundingBox();
+  const bb = g.boundingBox, size = bb.getSize(new THREE.Vector3());
+  const sc = Math.max(size.x, size.y, size.z) || 1;
+  const uv = new Float32Array(pos.count * 2);
+  for (let i = 0; i < pos.count; i++) {
+    const x = (pos.getX(i) - bb.min.x) / sc, y = (pos.getY(i) - bb.min.y) / sc, z = (pos.getZ(i) - bb.min.z) / sc;
+    const ax = Math.abs(nor.getX(i)), ay = Math.abs(nor.getY(i)), az = Math.abs(nor.getZ(i));
+    if (ax >= ay && ax >= az) { uv[2 * i] = z; uv[2 * i + 1] = y; }
+    else if (ay >= az) { uv[2 * i] = x; uv[2 * i + 1] = z; }
+    else { uv[2 * i] = x; uv[2 * i + 1] = y; }
+  }
+  g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  return g;
+}
+
+function applyTexture(e) {
+  if (!e) return;
+  if (!state.modelRoot) return toast('The scene is empty — add a shape or load a model first.', 'warn');
+  const recs = scopeRecs().filter((r) => !r.isPoints);
+  if (!recs.length) return toast('Nothing in the selection can show a texture (point clouds can’t).', 'warn');
+  let projected = 0;
+  for (const rec of recs) {
+    if (rec.mesh.geometry.getAttribute('uv')) continue;
+    const g = boxProjectUVs(rec.mesh.geometry);
+    rec.mesh.geometry = g; rec.baseline = g; rec.pct = 100;
+    projected++;
+  }
+  const tex = e.texture.clone(); // one shared layout for the whole selection
+  tex.repeat.set(1, 1); tex.offset.set(0, 0); tex.rotation = 0; tex.center.set(0.5, 0.5);
+  tex.needsUpdate = true;
+  eachScopeMaterial((m) => {
+    m.map = tex;
+    if (m.color) m.color.set(0xffffff); // so the texture shows its true colors (re-tint with Color)
+    if (e.hasAlpha) { m.transparent = true; m.alphaTest = 0.02; }
+    m.needsUpdate = true;
   });
-  const mesh = new THREE.Mesh(def.make(u), mat);
+  setViewMode('pbr');
+  state.activePreset = null;
+  updatePresetChips();
+  texActive = e;
+  syncMaterialSliders();
+  syncTextureControls();
+  renderTexLibrary();
+  pushHistory();
+  toast(`Applied <b>${escapeHTML(e.name)}</b> to <b>${escapeHTML(scopeName())}</b>.` +
+    (projected ? ` ${projected} part${projected > 1 ? 's' : ''} had no texture coordinates, so a simple box projection was added (works best on boxy shapes).` : '') +
+    ' Adjust Tiling / Rotation / Shift below; the Color picker tints it.', 'success', 6000);
+}
+
+// Place a picture in the scene as a flat, double-sided panel facing the camera
+function addImageToScene(e) {
+  if (!e) return;
+  const u = typicalSize() * 1.5;
+  const k = u / Math.max(e.w, e.h);
+  const geo = new THREE.PlaneGeometry(e.w * k, e.h * k);
+  const tex = e.texture.clone();
+  tex.needsUpdate = true;
+  const mat = new THREE.MeshStandardMaterial({
+    name: e.name + '_image', map: tex, side: THREE.DoubleSide, roughness: 0.9, metalness: 0,
+    transparent: e.hasAlpha, alphaTest: e.hasAlpha ? 0.02 : 0,
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  const toCam = new THREE.Vector3().subVectors(activeCam.position, controls.target);
+  mesh.rotation.y = Math.atan2(toCam.x, toCam.z);
   try {
     shapeObjects.add(mesh);
-    addToScene(mesh, 'SHAPE', { name: def.label, place: 'floor', frame: 'ifHidden', select: true });
-  } catch (e) {
-    return toast('Couldn’t add the shape: ' + escapeHTML(e.message || String(e)), 'error');
+    addToScene(mesh, 'IMAGE', { name: e.name, place: 'floor', frame: 'ifHidden', select: true });
+  } catch (err) {
+    return toast('Couldn’t add the image: ' + escapeHTML(err.message || String(err)), 'error');
   }
-  $('shape-popover').classList.add('hidden');
   if (state.tool === 'select') setTool('move');
-  toast(`Added a <b>${def.label}</b> — it’s selected: drag the arrows to move it, or use Rotate / Scale and the color controls in the Inspector.`, 'success', 4500);
+  texActive = e;
+  renderTexLibrary();
+  toast(`Placed <b>${escapeHTML(e.name)}</b> in the scene as a flat picture (${e.w}×${e.h}). It’s selected — move, rotate or resize it like any shape.`, 'success', 5000);
+}
+
+// Make the selection's textures independent of identical texture objects used elsewhere (e.g. glTF shares them)
+function makeScopeMapsUnique() {
+  makeScopeMaterialsUnique();
+  const inside = new Set(scopeRecs());
+  const outside = new Set();
+  for (const r of state.meshes) if (!inside.has(r)) for (const m of [].concat(r.baseMaterial)) if (m && m.map) outside.add(m.map);
+  const copies = new Map();
+  for (const r of inside) for (const m of [].concat(r.baseMaterial)) {
+    if (!m || !m.map || !outside.has(m.map)) continue;
+    if (!copies.has(m.map)) copies.set(m.map, m.map.clone());
+    m.map = copies.get(m.map);
+    m.needsUpdate = true;
+  }
+}
+
+function scopeMaps() {
+  const maps = new Set();
+  for (const r of scopeRecs()) for (const m of [].concat(r.baseMaterial)) if (m && m.map) maps.add(m.map);
+  return [...maps];
+}
+
+function setTexLayout(key, value) {
+  if (!state.modelRoot) return;
+  makeScopeMapsUnique();
+  for (const t of scopeMaps()) {
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.center.set(0.5, 0.5);
+    if (key === 'repeat') t.repeat.set(value, value);
+    else if (key === 'rotation') t.rotation = THREE.MathUtils.degToRad(value);
+    else if (key === 'offx') t.offset.x = value;
+    else if (key === 'offy') t.offset.y = value;
+    t.needsUpdate = true;
+  }
+}
+
+function syncTextureControls() {
+  const maps = state.modelRoot ? scopeMaps() : [];
+  const t = maps[0];
+  ['slider-tex-repeat', 'slider-tex-rot', 'slider-tex-offx', 'slider-tex-offy'].forEach((id) => { $(id).disabled = !t; });
+  $('tex-controls').classList.toggle('opacity-50', !t);
+  $('tex-controls-note').textContent = t
+    ? `Adjusting the texture on ${scopeName()}${maps.length > 1 ? ` (${maps.length} textures)` : ''}. Rotation is kept in GLB exports only.`
+    : 'Select something with a texture to adjust how it’s laid out.';
+  if (!t) return;
+  const rep = Math.round(t.repeat.x * 10);
+  $('slider-tex-repeat').value = clamp(rep, 10, 200);
+  $('val-tex-repeat').textContent = (rep / 10).toFixed(1) + '×';
+  const deg = Math.round(THREE.MathUtils.radToDeg(t.rotation));
+  $('slider-tex-rot').value = deg;
+  $('val-tex-rot').textContent = deg + '°';
+  $('slider-tex-offx').value = Math.round((((t.offset.x % 1) + 1) % 1) * 100);
+  $('slider-tex-offy').value = Math.round((((t.offset.y % 1) + 1) % 1) * 100);
+}
+
+async function downloadTexturePNG(e) {
+  if (!e) return;
+  let blob = e.pngBlob;
+  if (!blob) {
+    const u8 = await textureToPNG(e.texture);
+    if (!u8) return toast('This texture can’t be saved as PNG (compressed format).', 'warn');
+    blob = new Blob([u8], { type: 'image/png' });
+  }
+  saveBlob(blob, safeFileName(e.name) + '.png');
+}
+
+function removeTextureEntry(e) {
+  const i = texLib.indexOf(e);
+  if (i < 0) return;
+  texLib.splice(i, 1);
+  if (texActive === e) texActive = null;
+  renderTexLibrary();
+  toast(`Removed <b>${escapeHTML(e.name)}</b> from the library. Parts already using it keep it (use <b>Remove Texture</b> to strip it).`, 'info', 4500);
 }
 
 /* ------------------------------------------------------------------ */
@@ -2764,6 +3138,40 @@ $('slider-opacity').addEventListener('input', (e) => {
 $('slider-opacity').addEventListener('change', () => { if (state.modelRoot) pushHistory(); });
 $('btn-remove-texture').addEventListener('click', removeTextures);
 
+// Textures & images
+const texInput = $('texture-input'), imgInput = $('image-input');
+$('btn-import-texture').addEventListener('click', () => texInput.click());
+texInput.addEventListener('change', async () => {
+  const files = [...texInput.files];
+  texInput.value = '';
+  if (!files.length) return;
+  const { added, notes } = await importTextureFiles(files);
+  if (added.length) toast(`Imported ${added.length} texture${added.length > 1 ? 's' : ''}${notes.length ? ' (' + notes.join(', ') + ')' : ''}. Select a part and click a thumbnail to apply.`, 'success', 5000);
+});
+const pickImage = () => { $('shape-popover').classList.add('hidden'); imgInput.click(); };
+$('btn-add-image').addEventListener('click', pickImage);
+$('btn-menu-add-image').addEventListener('click', pickImage);
+imgInput.addEventListener('change', async () => {
+  const files = [...imgInput.files];
+  imgInput.value = '';
+  if (!files.length) return;
+  const { added } = await importTextureFiles(files);
+  if (added.length) addImageToScene(added[0]);
+});
+$('btn-tex-apply').addEventListener('click', () => applyTexture(texActive));
+$('btn-tex-place').addEventListener('click', () => addImageToScene(texActive));
+$('btn-tex-download').addEventListener('click', () => downloadTexturePNG(texActive));
+$('btn-tex-remove').addEventListener('click', () => removeTextureEntry(texActive));
+const bindTexSlider = (id, key, toVal, show) => {
+  const el = $(id);
+  el.addEventListener('input', () => { const v = toVal(Number(el.value)); if (show) show(v); setTexLayout(key, v); });
+  el.addEventListener('change', () => { if (state.modelRoot) pushHistory(); });
+};
+bindTexSlider('slider-tex-repeat', 'repeat', (v) => v / 10, (v) => { $('val-tex-repeat').textContent = v.toFixed(1) + '×'; });
+bindTexSlider('slider-tex-rot', 'rotation', (v) => v, (v) => { $('val-tex-rot').textContent = v + '°'; });
+bindTexSlider('slider-tex-offx', 'offx', (v) => v / 100);
+bindTexSlider('slider-tex-offy', 'offy', (v) => v / 100);
+
 // Material presets
 document.querySelectorAll('.mat-preset-btn').forEach((b) => b.addEventListener('click', () => applyPreset(b.dataset.preset)));
 
@@ -2911,6 +3319,8 @@ syncPolySliderUI();
 updatePresetChips();
 updatePartButtons();
 updateDownloadLabel();
+renderTexLibrary();
+syncTextureControls();
 
 console.info(`%cOnline 3D Studio ${APP_VERSION} ready — three.js r170, 100% client-side.`, 'color:#4cd7f6;font-weight:bold;');
 
