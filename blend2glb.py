@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-blend2glb.py — batch-convert Blender .blend files to .glb or .obj (drop-in companions for Aether3D Studio).
+blend2glb.py — batch-convert Blender .blend files to .glb or .obj (drop-in companions for Online 3D Studio).
 
 Why this exists
     .blend is Blender's private binary format. No browser (or any tool without Blender's
-    own code) can reliably read it. So Aether3D Studio (index.html) cannot open .blend
+    own code) can reliably read it. So Online 3D Studio (index.html) cannot open .blend
     files directly — but it opens the converted .glb/.obj perfectly.
 
     This script runs Blender headlessly ("Blender without a window") to convert files.
@@ -25,7 +25,7 @@ Usage
     Windows example:
         py blend2glb.py "C:\\Models\\scene.blend" --blender "C:\\Program Files\\Blender Foundation\\Blender 4.2\\blender.exe"
 
-After converting: open the produced .glb/.obj in Aether3D Studio (drag & drop), edit, and
+After converting: open the produced .glb/.obj in Online 3D Studio (drag & drop), edit, and
 export to GLB / OBJ / STL — the full round trip needs no server at all.
 """
 
@@ -178,7 +178,7 @@ def main() -> int:
         prog="blend2glb.py",
         description="Batch-convert .blend files to .glb or .obj using headless Blender.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="The converted files open directly in Aether3D Studio (index.html).",
+        epilog="The converted files open directly in Online 3D Studio (index.html).",
     )
     ap.add_argument("inputs", nargs="+", metavar="BLEND_OR_FOLDER",
                     help=".blend file(s), or folder(s) containing .blend files")
@@ -226,7 +226,7 @@ def main() -> int:
     for f in failed:
         print(f"  failed: {f}", file=sys.stderr)
     if done:
-        print(f"Drop the {args.format.upper()} files into Aether3D Studio to view & edit them.")
+        print(f"Drop the {args.format.upper()} files into Online 3D Studio to view & edit them.")
     return 0 if not failed else 1
 
 
