@@ -1,5 +1,5 @@
 /* =====================================================================
-   Aether3D Studio — static in-browser 3D model viewer & editor
+   Online 3D Studio — static in-browser 3D model viewer & editor
    Pure client-side three.js (r170). No backend, no build step.
    Works from file://, any static host, or GitHub Pages.
    ===================================================================== */
@@ -394,7 +394,7 @@ async function parseModel(file, map) {
         const creator = new MTLLoader().parse(mtlText, '');
         creator.preload();
         objLoader.setMaterials(creator);
-      } catch (e) { console.warn('[Aether3D] MTL parsing failed — loading OBJ without materials:', e); }
+      } catch (e) { console.warn('[Online3D] MTL parsing failed — loading OBJ without materials:', e); }
     }
     return objLoader.parse(text);
   }
@@ -489,7 +489,7 @@ async function handleFiles(fileList) {
     const s = modelStats();
     toast(`Loaded <b>${escapeHTML(primary.name)}</b> — ${fmtInt(s.tris)} triangles, ${state.meshes.length} mesh${state.meshes.length !== 1 ? 'es' : ''}. Processed 100% locally; nothing was uploaded.`, 'success', 5000);
   } catch (err) {
-    console.error('[Aether3D] Load failed:', err);
+    console.error('[Online3D] Load failed:', err);
     for (const u of freshURLs) { try { URL.revokeObjectURL(u); } catch (e) {} }
     toast(`Failed to load <b>${escapeHTML(primary.name)}</b>: ${escapeHTML((err && err.message) || String(err))}`, 'error', 9000);
     setStatus('Error', false);
@@ -1216,7 +1216,7 @@ function subdivideGeometry(src) {
     geo.setIndex(new THREE.BufferAttribute(outIdx.subarray(0, w), 1));
     return geo;
   } catch (e) {
-    console.warn('[Aether3D] subdivide failed:', e);
+    console.warn('[Online3D] subdivide failed:', e);
     return null;
   }
 }
@@ -1327,7 +1327,7 @@ function decimateGeometry(src, targetTris) {
     geo.computeVertexNormals();
     return geo;
   } catch (e) {
-    console.warn('[Aether3D] decimate failed:', e);
+    console.warn('[Online3D] decimate failed:', e);
     return null;
   }
 }
@@ -1342,7 +1342,7 @@ function mirrorGeometry(src) {
     if (state.autoNormals) g.computeVertexNormals();
     return g;
   } catch (e) {
-    console.warn('[Aether3D] mirror failed:', e);
+    console.warn('[Online3D] mirror failed:', e);
     return null;
   }
 }
@@ -1680,7 +1680,7 @@ function opSplit() {
       pushHistory();
       toast(`Split into <b>${created}</b> separate parts${lumped ? ` (tiny fragments grouped as “small_bits”)` : ''}. Click any part to select it, then move, recolor, hide or delete it. Ctrl+Z to undo.`, 'success', 7000);
     } catch (e) {
-      console.error('[Aether3D] split failed:', e);
+      console.error('[Online3D] split failed:', e);
       toast('Split failed: ' + escapeHTML(e.message || String(e)), 'error');
     } finally {
       setLoading(false);
@@ -1871,16 +1871,16 @@ async function doExport() {
     if (fmt === 'obj') {
       const text = new OBJExporter().parse(state.modelRoot);
       blob = new Blob([text], { type: 'text/plain' });
-      name = `${state.baseName}_aether.obj`;
+      name = `${state.baseName}_edited.obj`;
     } else if (fmt === 'glb') {
       const result = await new Promise((resolve, reject) =>
         new GLTFExporter().parse(state.modelRoot, resolve, reject, { binary: true, onlyVisible: true }));
       blob = new Blob([result], { type: 'model/gltf-binary' });
-      name = `${state.baseName}_aether.glb`;
+      name = `${state.baseName}_edited.glb`;
     } else if (fmt === 'stl') {
       const dv = new STLExporter().parse(state.modelRoot, { binary: true });
       blob = new Blob([dv], { type: 'application/octet-stream' });
-      name = `${state.baseName}_aether.stl`;
+      name = `${state.baseName}_edited.stl`;
     } else {
       throw new Error('Unknown format');
     }
@@ -1890,7 +1890,7 @@ async function doExport() {
       toast(`Exported <b>${escapeHTML(name)}</b> (${fmtBytes(blob.size)}) — all edits baked in. Check your downloads.`, 'success', 5000);
     }
   } catch (err) {
-    console.error('[Aether3D] export failed:', err);
+    console.error('[Online3D] export failed:', err);
     toast(`Export failed: ${escapeHTML((err && err.message) || String(err))}`, 'error', 7000);
   } finally {
     hidden.forEach(([m, p]) => p.add(m));
@@ -2012,7 +2012,7 @@ async function loadSample(key) {
     setModel(obj, s.fmt);
     toast(`Sample loaded: <b>${s.label}</b> (${s.fmt}). Drag to orbit, scroll to zoom, try the edit tools!`, 'success', 4200);
   } catch (err) {
-    console.error('[Aether3D] sample failed:', err);
+    console.error('[Online3D] sample failed:', err);
     toast(`Couldn’t load the <b>${s.label}</b> sample (${escapeHTML(err.message || err)}). CDN unreachable? The <b>Torus Knot</b> sample works fully offline.`, 'error', 8000);
   } finally {
     setLoading(false);
@@ -2360,7 +2360,7 @@ syncPolySliderUI();
 updatePresetChips();
 updatePartButtons();
 
-console.info('%cAether3D Studio ready — three.js r170, 100% client-side.', 'color:#4cd7f6;font-weight:bold;');
+console.info('%cOnline 3D Studio ready — three.js r170, 100% client-side.', 'color:#4cd7f6;font-weight:bold;');
 
 // Expose a small API (handy for power users & automated tests)
 window.aether3d = {
