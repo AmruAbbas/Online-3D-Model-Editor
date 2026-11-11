@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html class="dark" lang="en"><head><meta charset="utf-8"/><meta content="width=device-width, initial-scale=1.0" name="viewport"/><meta content="web_dashboard" name="shell-type"/>
+<meta name="description" content="Aether3D Studio — view, edit and export 3D models (OBJ, FBX, GLB/GLTF, STL, PLY, DAE, 3MF) entirely in your browser. 100% static, perfect for GitHub Pages."/>
+<title>Aether3D Studio — Browser 3D Viewer &amp; Editor</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23a078ff'/%3E%3Cpath d='M32 12 L52 52 H42 L32 30 L22 52 H12 Z' fill='%23121318'/%3E%3C/svg%3E"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@100..900&family=Plus+Jakarta+Sans:wght@100..900&family=Space+Grotesk:wght@100..900&display=swap" rel="stylesheet"/><style>@layer base{html,body{margin:0;padding:0;}body{overscroll-behavior:none;}main>:first-child{margin-top:0!important;}main>:last-child{margin-bottom:0!important;}}::-webkit-scrollbar{display:none;}</style><script src="https://cdn.tailwindcss.com"></script><script id="tailwind-config">tailwind.config={darkMode:"class",theme:{extend:{colors:{"surface":"#121318","on-surface":"#e3e1e9","tertiary-fixed-dim":"#ffb95f","primary-container":"#a078ff","tertiary":"#ffb95f","on-error-container":"#ffdad6","surface-container-low":"#1a1b21","inverse-primary":"#6d3bd7","inverse-surface":"#e3e1e9","surface-dim":"#121318","on-secondary-fixed-variant":"#004e5c","secondary-fixed":"#acedff","on-secondary-container":"#00424e","surface-container-lowest":"#0d0e13","secondary-fixed-dim":"#4cd7f6","on-primary-container":"#340080","secondary-container":"#03b5d3","inverse-on-surface":"#2f3036","background":"#121318","on-secondary-fixed":"#001f26","tertiary-container":"#ca8100","on-error":"#690005","surface-variant":"#34343a","on-primary-fixed-variant":"#5516be","surface-tint":"#d0bcff","on-tertiary-fixed-variant":"#653e00","surface-container-high":"#292a2f","on-tertiary-fixed":"#2a1700","outline":"#958ea0","on-tertiary":"#472a00","error-container":"#93000a","primary-fixed-dim":"#d0bcff","surface-container-highest":"#34343a","surface-container":"#1e1f25","on-tertiary-container":"#3e2400","on-primary":"#3c0091","primary":"#d0bcff","on-secondary":"#003640","primary-fixed":"#e9ddff","surface-bright":"#38393f","secondary":"#4cd7f6","on-surface-variant":"#cbc3d7","on-background":"#e3e1e9","error":"#ffb4ab","outline-variant":"#494454","on-primary-fixed":"#23005c","tertiary-fixed":"#ffddb8"},borderRadius:{"DEFAULT":"0.125rem","lg":"0.25rem","xl":"0.5rem","full":"0.75rem"},spacing:{"margin-lg":"1.5rem","gutter":"0.5rem","space-xl":"1.5rem","space-xs":"0.25rem","space-md":"0.75rem","gutter-lg":"1rem","space-lg":"1rem","margin":"0.75rem","space-sm":"0.5rem"},fontFamily:{"label-sm":["JetBrains Mono"],"label-md":["JetBrains Mono"],"body-lg":["Plus Jakarta Sans"],"body-md":["Plus Jakarta Sans"],"body-sm":["Plus Jakarta Sans"],"headline-md":["Space Grotesk"],"headline-lg":["Space Grotesk"],"display-lg-mobile":["Space Grotesk"],"display-lg":["Space Grotesk"]},fontSize:{"label-sm":["10px",{"lineHeight":"14px","letterSpacing":"0.04em","fontWeight":"500"}],"label-md":["12px",{"lineHeight":"16px","letterSpacing":"0.02em","fontWeight":"500"}],"body-lg":["15px",{"lineHeight":"22px","fontWeight":"400"}],"body-md":["13px",{"lineHeight":"18px","fontWeight":"400"}],"body-sm":["12px",{"lineHeight":"16px","fontWeight":"400"}],"headline-md":["18px",{"lineHeight":"24px","fontWeight":"500"}],"headline-lg":["24px",{"lineHeight":"32px","letterSpacing":"-0.01em","fontWeight":"500"}],"display-lg-mobile":["28px",{"lineHeight":"36px","letterSpacing":"-0.01em","fontWeight":"600"}],"display-lg":["40px",{"lineHeight":"48px","letterSpacing":"-0.02em","fontWeight":"600"}]}}}};</script>
+<style>
+  input, textarea { user-select: text; -webkit-user-select: text; }
+  #c3d { display:block; width:100%; height:100%; touch-action:none; outline:none; }
+  #gizmo-canvas { display:block; width:100%; height:100%; }
+  .toast { opacity:0; transform: translateY(10px); transition: opacity .25s ease, transform .25s ease; }
+  .toast.show { opacity:1; transform: translateY(0); }
+  .export-format-btn[data-disabled="1"] { opacity:.32; }
+  body.preview-mode #app-header, body.preview-mode #left-aside, body.preview-mode #top-hud,
+  body.preview-mode #quickcam-strip, body.preview-mode #transform-bar, body.preview-mode #drop-tray,
+  body.preview-mode #right-dock { display:none !important; }
+  body.preview-mode #app-shell { padding-left: 0 !important; }
+  body.preview-mode #app-main { padding-top: 0 !important; }
+  body.preview-mode #viewport-height { height: 100vh !important; }
+  #btn-exit-preview { display:none; }
+  body.preview-mode #btn-exit-preview { display:flex; }
+  #viewport-canvas-container.drop-active { box-shadow: inset 0 0 0 3px rgba(208,188,255,.65); }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+  }
+}
+</script>
+</head><body class="bg-surface-container-lowest text-on-surface font-body-md text-body-md select-none"><header id="app-header" class="fixed top-0 left-0 right-0 z-50 h-16 bg-surface-container-low/90 backdrop-blur-xl shadow-[0_1px_16px_rgba(0,0,0,0.45)]"><div class="h-16 w-full px-gutter-lg flex items-center justify-between gap-space-md"><div class="flex items-center gap-space-lg shrink-0"><div class="flex items-center gap-space-sm"><img alt="Aether3D Studio Logo" class="h-8 w-auto object-contain" src="https://lh3.googleusercontent.com/aida/ALJJyrBNnk7NhFjBte_An_ILiYg2b_TghLPC32oKbG1bWd2u6_ptC-xtxkwr_9Q1rGN_DshBm1KHyI42yYiLGwOixVNpOFXLYz-d12dSXuLOSGNL4gvsIj1Nvd3UjMy7VHokOEq45vDicZ7kROvElA6S8wOZI4YL7KR8Qjhinvro7QDyGxBzHlEey-qwroW0-hwbsWeEGfFctsHqivMoPLk2WKySGUvpY5yU-aYvpfztCD5q"/><span class="font-headline-md text-headline-md font-bold tracking-tight text-on-surface">Aether3D</span><span class="px-space-xs py-0.5 rounded bg-surface-container-highest text-secondary font-label-sm text-label-sm uppercase tracking-wider">Studio v2.4</span></div><nav class="hidden xl:flex items-center gap-space-xs" data-active-classes="bg-surface-container-high text-on-surface font-medium"><button class="px-space-sm py-1.5 rounded text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface transition-colors font-body-sm text-body-sm" id="nav-import" type="button">Import / Drop</button><button aria-current="page" class="px-space-sm py-1.5 rounded transition-colors bg-surface-container-high text-on-surface font-medium" id="nav-new" type="button">New Scene</button><div class="relative"><button class="px-space-sm py-1.5 rounded text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface transition-colors font-body-sm text-body-sm" id="nav-samples" type="button">Open Sample</button><div class="hidden absolute left-0 top-full mt-2 w-72 p-1.5 rounded-xl bg-surface-container-low/95 backdrop-blur-xl ring-1 ring-white/10 shadow-2xl z-50" id="sample-popover"><div class="px-2 py-1 font-label-sm text-label-sm uppercase tracking-wider text-on-surface-variant">Sample Models</div><button class="sample-item w-full flex items-center gap-space-sm px-2 py-2 rounded-lg text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface transition-colors text-left" data-sample="torus" type="button"><span class="material-symbols-outlined text-lg text-secondary">donut_large</span><span class="flex-1"><span class="block font-body-sm text-body-sm text-on-surface">Torus Knot</span><span class="block font-label-sm text-label-sm text-outline">Procedural • works offline</span></span></button><button class="sample-item w-full flex items-center gap-space-sm px-2 py-2 rounded-lg text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface transition-colors text-left" data-sample="helmet" type="button"><span class="material-symbols-outlined text-lg text-tertiary">sports_motorsports</span><span class="flex-1"><span class="block font-body-sm text-body-sm text-on-surface">Damaged Helmet</span><span class="block font-label-sm text-label-sm text-outline">glTF • PBR textures</span></span></button><button class="sample-item w-full flex items-center gap-space-sm px-2 py-2 rounded-lg text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface transition-colors text-left" data-sample="male02" type="button"><span class="material-symbols-outlined text-lg text-primary">person</span><span class="flex-1"><span class="block font-body-sm text-body-sm text-on-surface">Retro Man</span><span class="block font-label-sm text-label-sm text-outline">OBJ + MTL + textures</span></span></button><button class="sample-item w-full flex items-center gap-space-sm px-2 py-2 rounded-lg text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface transition-colors text-left" data-sample="samba" type="button"><span class="material-symbols-outlined text-lg text-secondary">emoji_people</span><span class="flex-1"><span class="block font-body-sm text-body-sm text-on-surface">Samba Dancer</span><span class="block font-label-sm text-label-sm text-outline">FBX • shows FBX pipeline</span></span></button><button class="sample-item w-full flex items-center gap-space-sm px-2 py-2 rounded-lg text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface transition-colors text-left" data-sample="lucy" type="button"><span class="material-symbols-outlined text-lg text-outline">face</span><span class="flex-1"><span class="block font-body-sm text-body-sm text-on-surface">Lucy Scan</span><span class="block font-label-sm text-label-sm text-outline">PLY • 100k vertices</span></span></button></div></div></nav></div><div class="hidden md:flex items-center gap-space-sm px-space-md py-1.5 rounded bg-surface-container-lowest/80 shadow-[inset_0_1px_2px_rgba(0,0,0,0.6)]"><span class="w-2 h-2 rounded-full bg-secondary shadow-[0_0_8px_#4cd7f6]"></span><span class="font-label-md text-label-md text-on-surface font-medium truncate max-w-xs lg:max-w-md" id="header-file-name">no_model_loaded</span><span class="font-label-sm text-label-sm text-on-surface-variant" id="header-file-meta">Drop a 3D file — nothing is uploaded</span><span class="px-space-xs py-0.5 rounded bg-secondary-container/20 text-secondary font-label-sm text-label-sm" id="header-file-status">Idle</span></div><div class="flex items-center gap-space-sm shrink-0"><button class="hidden lg:flex items-center gap-space-xs px-space-sm py-1.5 rounded bg-surface-container hover:bg-surface-container-high text-on-surface-variant hover:text-on-surface transition-colors font-body-sm text-body-sm" id="btn-quick-preview" title="Distraction-free fullscreen viewport (Esc to exit)" type="button"><span class="material-symbols-outlined text-sm">visibility</span><span>Quick Preview</span></button><div class="hidden sm:flex items-center bg-surface-container rounded"><button class="p-1.5 text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high rounded transition-colors disabled:opacity-30 disabled:pointer-events-none" id="btn-undo" title="Undo (Ctrl+Z)" type="button"><span class="material-symbols-outlined text-base">undo</span></button><button class="p-1.5 text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high rounded transition-colors disabled:opacity-30 disabled:pointer-events-none" id="btn-redo" title="Redo (Ctrl+Shift+Z)" type="button"><span class="material-symbols-outlined text-base">redo</span></button></div><button class="hidden sm:block px-space-sm py-1.5 rounded bg-surface-container text-on-surface-variant hover:bg-surface-container-high transition-colors font-body-sm text-body-sm" id="btn-simple-edit" title="Toggle the inspector dock" type="button">Simple Edit</button><div class="flex items-center"><button class="flex items-center gap-space-xs px-space-md py-1.5 rounded bg-primary-container text-on-primary-container font-headline-md text-body-sm font-medium hover:bg-primary transition-all shadow-[0_0_16px_rgba(160,120,255,0.4)]" id="btn-header-export" type="button"><span class="material-symbols-outlined text-base">download</span><span id="btn-header-export-label">Export</span><span class="material-symbols-outlined text-sm">arrow_drop_down</span></button></div><div class="flex items-center gap-space-xs pl-space-xs"><button class="p-1 text-on-surface-variant hover:text-on-surface hover:bg-surface-container rounded transition-colors" id="btn-toggle-grid" title="Toggle grid" type="button"><span class="material-symbols-outlined text-lg">tune</span></button><img alt="Profile" class="w-8 h-8 rounded-full object-cover shadow-[0_0_0_1px_rgba(208,188,255,0.3)]" src="https://lh3.googleusercontent.com/aida-public/AB6AXuCaMyaTzIN2GgU3LYya6ZoFz7CL2Zgz3OnLH2epW8coRpHo7xqmzhnGFMnzst1Cz0RukH_3A-iDDmAejZen7mWMEV8jGLWSTXGjzcNdBUSDsEl7b5ljWDhmGPtV1lnX58t55JDthKuiTIccAlBxrRploaNuGLbhzwB_-Wf-zmNc9_PKl9XZDPLyvNn0VAvVTpDnsrLWMZWBoML5qzagakFjHJZfBhPE0zSeq1KifK0"/></div></div></div></header><aside id="left-aside" class="fixed left-0 top-16 bottom-0 w-64 bg-surface-container-low/75 backdrop-blur-xl z-40 flex flex-col justify-between p-space-md"><div class="flex flex-col gap-space-md"><div class="flex items-center justify-between px-space-sm text-on-surface-variant font-label-sm text-label-sm uppercase tracking-wider"><span>Studio Outliner</span><span class="material-symbols-outlined text-base text-outline">account_tree</span></div><nav class="flex flex-col gap-space-xs overflow-y-auto max-h-[60vh] pr-0.5" id="outliner-list"></nav></div><div class="p-space-sm rounded bg-surface-container-lowest/90 flex flex-col gap-space-xs"><div class="flex items-center justify-between text-on-surface-variant font-label-sm text-label-sm"><span>Scene Geometry</span><span class="text-secondary font-label-sm text-label-sm" id="geom-label">0 tris</span></div><div class="w-full h-1 bg-surface-container-highest rounded-full overflow-hidden"><div class="bg-secondary h-full rounded-full transition-all" id="geom-bar" style="width:0%"></div></div><div class="flex justify-between items-center pt-space-xs text-outline font-label-sm text-label-sm"><span id="stat-fps">FPS: —</span><span id="stat-engine">Engine: WebGL2</span></div><div class="flex justify-between items-center text-outline font-label-sm text-label-sm"><span id="stat-calls">Draw calls: —</span><span id="stat-textures">Tex: —</span></div></div></aside><div class="pl-64" id="app-shell"><main id="app-main" class="relative pt-16 min-h-screen bg-surface-container-lowest"><div class="flex flex-col w-full h-[calc(100vh-4rem)] overflow-hidden" id="viewport-height">
+<!-- Master Workspace Layout: Viewport Center with Floating Glass HUDs + Right Inspector Dock -->
+<div class="relative w-full h-full flex overflow-hidden">
+<!-- PRIMARY 3D VIEWPORT (real WebGL canvas) -->
+<div class="relative flex-1 h-full bg-surface-container-lowest overflow-hidden select-none cursor-grab active:cursor-grabbing" id="viewport-canvas-container">
+<canvas id="c3d"></canvas>
+<!-- soft vignette above canvas, below HUDs -->
+<div class="absolute inset-0 pointer-events-none z-10" style="background: radial-gradient(ellipse at center, transparent 52%, rgba(13,14,19,0.55) 100%)"></div>
+<!-- EMPTY STATE -->
+<div class="absolute inset-0 z-[15] flex items-center justify-center pointer-events-none" id="empty-state">
+  <div class="flex flex-col items-center gap-3 text-center px-6">
+    <div class="w-20 h-20 rounded-2xl bg-surface-container-low/85 ring-1 ring-white/10 flex items-center justify-center shadow-2xl"><span class="material-symbols-outlined text-4xl text-secondary">view_in_ar</span></div>
+    <div class="font-headline-lg text-headline-lg text-on-surface">Drop a 3D model to begin</div>
+    <p class="font-body-md text-body-md text-on-surface-variant max-w-md">Drag &amp; drop a file anywhere — or click the dashed tray in the bottom-left corner.<br/>Everything runs <span class="text-secondary font-medium">100% locally in your browser</span>; no server, no upload.</p>
+    <div class="flex flex-wrap items-center justify-center gap-1.5 pointer-events-auto pt-1">
+      <span class="px-1.5 py-0.5 rounded bg-surface-container-high text-outline text-[9px] font-label-sm">OBJ</span>
+      <span class="px-1.5 py-0.5 rounded bg-surface-container-high text-outline text-[9px] font-label-sm">FBX</span>
+      <span class="px-1.5 py-0.5 rounded bg-surface-container-high text-outline text-[9px] font-label-sm">GLB/GLTF</span>
+      <span class="px-1.5 py-0.5 rounded bg-surface-container-high text-outline text-[9px] font-label-sm">STL</span>
+      <span class="px-1.5 py-0.5 rounded bg-surface-container-high text-outline text-[9px] font-label-sm">PLY</span>
+      <span class="px-1.5 py-0.5 rounded bg-surface-container-high text-outline text-[9px] font-label-sm">DAE</span>
+      <span class="px-1.5 py-0.5 rounded bg-surface-container-high text-outline text-[9px] font-label-sm">3MF</span>
+      <span class="px-1.5 py-0.5 rounded bg-surface-container-highest text-outline/60 text-[9px] font-label-sm line-through">BLEND*</span>
+    </div>
+    <div class="flex items-center gap-2 pointer-events-auto pt-2">
+      <button class="px-3 py-1.5 rounded-lg bg-primary-container text-on-primary-container font-label-md text-label-md font-medium hover:bg-primary transition-all shadow-lg flex items-center gap-1.5" id="btn-sample-torus" type="button"><span class="material-symbols-outlined text-sm">donut_large</span>Torus Knot (offline)</button>
+      <button class="px-3 py-1.5 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface font-label-md text-label-md transition-colors flex items-center gap-1.5" id="btn-sample-helmet" type="button"><span class="material-symbols-outlined text-sm">sports_motorsports</span>Damaged Helmet</button>
+    </div>
+    <p class="font-label-sm text-label-sm text-outline pt-1">*.blend can’t be parsed in-browser — export GLB/OBJ from Blender first</p>
+  </div>
+</div>
+<!-- LOADING OVERLAY -->
+<div class="hidden absolute inset-0 z-40 flex items-center justify-center bg-surface-container-lowest/70 backdrop-blur-sm" id="loading-overlay">
+  <div class="w-80 max-w-[90%] p-space-md rounded-2xl bg-surface-container-low/95 ring-1 ring-white/10 shadow-2xl flex flex-col gap-3">
+    <div class="flex items-center gap-space-sm"><span class="material-symbols-outlined text-secondary animate-spin">progress_activity</span><span class="font-headline-md text-body-md font-semibold text-on-surface" id="loading-label">Loading model…</span></div>
+    <div class="w-full h-1.5 bg-surface-container-highest rounded-full overflow-hidden"><div class="h-full rounded-full bg-secondary transition-all duration-200" id="loading-bar" style="width:20%"></div></div>
+    <div class="flex justify-between font-label-sm text-label-sm text-outline"><span id="loading-pct">working…</span><span>100% local — no upload</span></div>
+  </div>
+</div>
+<!-- TOASTS -->
+<div class="absolute top-20 right-space-lg z-[45] flex flex-col items-end gap-2 pointer-events-none w-full max-w-md" id="toast-container"></div>
+<!-- TOP FLOATING HUD: View Modes & Camera & Presets -->
+<div class="absolute top-space-lg left-space-lg right-space-lg flex items-center justify-between pointer-events-none z-30" id="top-hud">
+<!-- Render Shading Mode Selector -->
+<div class="pointer-events-auto flex items-center gap-0.5 p-1 rounded-xl bg-surface-container-low/85 backdrop-blur-xl shadow-2xl ring-1 ring-white/10">
+<button class="viewmode-btn px-2.5 py-1 rounded-lg text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high transition-all font-label-md text-label-md flex items-center gap-1.5" data-mode="wireframe" type="button">
+<span class="material-symbols-outlined text-sm">grid_3x3</span>
+<span>Wire</span>
+</button>
+<button class="viewmode-btn px-2.5 py-1 rounded-lg text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high transition-all font-label-md text-label-md flex items-center gap-1.5" data-mode="matcap" type="button">
+<span class="material-symbols-outlined text-sm">blur_on</span>
+<span>MatCap</span>
+</button>
+<button class="viewmode-btn px-2.5 py-1 rounded-lg bg-primary-container text-on-primary-container shadow-md font-label-md text-label-md font-medium flex items-center gap-1.5" data-mode="pbr" type="button">
+<span class="material-symbols-outlined text-sm" style="font-variation-settings: 'FILL' 1;">light_mode</span>
+<span>PBR Shaded</span>
+</button>
+<button class="viewmode-btn px-2.5 py-1 rounded-lg text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high transition-all font-label-md text-label-md flex items-center gap-1.5" data-mode="xray" type="button">
+<span class="material-symbols-outlined text-sm">opacity</span>
+<span>X-Ray</span>
+</button>
+<div class="h-4 w-px bg-white/10 mx-1"></div>
+<!-- Camera Projection Switcher -->
+<div class="flex items-center">
+<button class="px-2 py-1 rounded-lg text-secondary bg-surface-container-high font-label-sm text-label-sm font-semibold" id="cam-perspective" type="button">PERSP</button>
+<button class="px-2 py-1 rounded-lg text-on-surface-variant hover:text-on-surface font-label-sm text-label-sm" id="cam-ortho" type="button">ORTHO</button>
+</div>
+</div>
+<!-- Right Side: Orientation Gizmo & Lighting Presets -->
+<div class="pointer-events-auto flex items-center gap-space-sm">
+<!-- Studio Lighting Presets -->
+<div class="flex items-center p-1 rounded-xl bg-surface-container-low/85 backdrop-blur-xl shadow-2xl ring-1 ring-white/10">
+<button class="light-preset-btn p-1.5 rounded-lg text-on-surface hover:bg-surface-container-high transition-colors" data-preset="0" title="Studio Softbox" type="button">
+<span class="material-symbols-outlined text-base">wb_incandescent</span>
+</button>
+<button class="light-preset-btn p-1.5 rounded-lg text-on-surface-variant hover:bg-surface-container-high transition-colors" data-preset="1" title="Neon Cyberpunk (Cyan / Violet)" type="button">
+<span class="material-symbols-outlined text-base">fluorescent</span>
+</button>
+<button class="light-preset-btn p-1.5 rounded-lg text-on-surface-variant hover:bg-surface-container-high transition-colors" data-preset="2" title="Sunset Golden Hour" type="button">
+<span class="material-symbols-outlined text-base">sunny</span>
+</button>
+<button class="light-preset-btn p-1.5 rounded-lg text-on-surface-variant hover:bg-surface-container-high transition-colors" data-preset="3" title="High-Contrast Rim Noir" type="button">
+<span class="material-symbols-outlined text-base">contrast</span>
+</button>
+</div>
+<!-- Interactive XYZ Orientation Gizmo (live, synced to camera) -->
+<div class="w-11 h-11 rounded-xl bg-surface-container-low/90 backdrop-blur-xl ring-1 ring-white/10 flex items-center justify-center relative cursor-pointer hover:bg-surface-container-high transition-all group shadow-xl pointer-events-none">
+<canvas height="88" id="gizmo-canvas" width="88"></canvas>
+</div>
+</div>
+</div>
+<!-- VIEWPORT FLOATING QUICK-CAM ACTIONS (Left Vertical Strip) -->
+<div class="absolute left-space-lg top-24 flex flex-col gap-1.5 p-1 rounded-xl bg-surface-container-low/80 backdrop-blur-xl shadow-xl ring-1 ring-white/10 z-20" id="quickcam-strip">
+<button class="nav-mode-btn p-2 rounded-lg text-secondary bg-surface-container-high transition-all" data-nav="orbit" title="Orbit with left mouse (default)" type="button">
+<span class="material-symbols-outlined text-lg">orbit</span>
+</button>
+<button class="nav-mode-btn p-2 rounded-lg text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high transition-all" data-nav="pan" title="Pan with left mouse" type="button">
+<span class="material-symbols-outlined text-lg">pan_tool</span>
+</button>
+<button class="nav-mode-btn p-2 rounded-lg text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high transition-all" data-nav="zoom" title="Dolly/zoom with left mouse" type="button">
+<span class="material-symbols-outlined text-lg">zoom_in</span>
+</button>
+<div class="w-full h-px bg-white/10 my-0.5"></div>
+<button class="p-2 rounded-lg text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high transition-all" id="btn-frame" title="Frame model (F)" type="button">
+<span class="material-symbols-outlined text-lg">center_focus_strong</span>
+</button>
+<button class="p-2 rounded-lg text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high transition-all" id="btn-cam-reset" title="Reset default camera angle" type="button">
+<span class="material-symbols-outlined text-lg">restart_alt</span>
+</button>
+</div>
+<!-- IN-VIEWPORT DRAG & DROP MINI OVERLAY / QUICK LOADER TRAY -->
+<div class="absolute left-space-lg bottom-20 z-20 max-w-sm w-full" id="drop-tray">
+<div class="p-space-sm rounded-xl bg-surface-container-low/85 backdrop-blur-2xl ring-1 ring-white/10 shadow-2xl transition-all hover:ring-primary/40">
+<div class="flex items-center justify-between mb-1.5">
+<div class="flex items-center gap-1.5">
+<span class="material-symbols-outlined text-secondary text-base">cloud_upload</span>
+<span class="font-headline-md text-body-sm font-semibold text-on-surface">Drag &amp; Drop Model</span>
+</div>
+<span class="font-label-sm text-label-sm text-outline">100% local • no upload</span>
+</div>
+<div class="border-2 border-dashed border-white/10 hover:border-primary/60 rounded-lg p-2.5 text-center transition-colors bg-surface-container-lowest/60 group cursor-pointer" id="dropzone">
+<p class="font-body-sm text-body-sm text-on-surface-variant group-hover:text-on-surface">
+              Drop <span class="text-primary font-mono font-medium">.OBJ</span>, <span class="text-primary font-mono font-medium">.FBX</span>, <span class="text-primary font-mono font-medium">.GLB/.GLTF</span>, <span class="text-primary font-mono font-medium">.STL</span>, <span class="text-primary font-mono font-medium">.PLY</span>, <span class="text-primary font-mono font-medium">.DAE</span> or <span class="text-primary font-mono font-medium">.3MF</span>
+</p>
+<p class="font-label-sm text-label-sm text-outline mt-1">Multi-file drops welcome (obj+mtl+textures, gltf+bin)</p>
+<div class="flex items-center justify-center flex-wrap gap-1 mt-2">
+<span class="px-1.5 py-0.5 rounded bg-surface-container-high text-outline text-[9px] font-label-sm">OBJ</span>
+<span class="px-1.5 py-0.5 rounded bg-surface-container-high text-outline text-[9px] font-label-sm">FBX</span>
+<span class="px-1.5 py-0.5 rounded bg-surface-container-high text-outline text-[9px] font-label-sm">GLTF/GLB</span>
+<span class="px-1.5 py-0.5 rounded bg-surface-container-high text-outline text-[9px] font-label-sm">STL</span>
+<span class="px-1.5 py-0.5 rounded bg-surface-container-high text-outline text-[9px] font-label-sm">PLY</span>
+<span class="px-1.5 py-0.5 rounded bg-surface-container-high text-outline text-[9px] font-label-sm">DAE</span>
+<span class="px-1.5 py-0.5 rounded bg-surface-container-high text-outline text-[9px] font-label-sm">3MF</span>
+<span class="px-1.5 py-0.5 rounded bg-surface-container-highest text-outline/60 text-[9px] font-label-sm line-through">BLEND</span>
+</div>
+</div>
+<!-- Sample Quick Pickers -->
+<div class="mt-2 pt-2 border-t border-white/5 flex items-center justify-between text-on-surface-variant font-label-sm text-label-sm">
+<span>Quick Samples:</span>
+<div class="flex items-center gap-1">
+<button class="px-1.5 py-0.5 rounded bg-surface-container hover:bg-surface-container-high hover:text-on-surface transition-colors" id="btn-sample-torus-2" type="button">Torus Knot</button>
+<button class="px-1.5 py-0.5 rounded bg-surface-container hover:bg-surface-container-high hover:text-on-surface transition-colors" id="btn-sample-helmet-2" type="button">Damaged Helmet</button>
+</div>
+</div>
+</div>
+</div>
+<!-- BOTTOM CENTER FLOATING TRANSFORM BAR (Simple Edit Tools) -->
+<div class="absolute bottom-space-lg left-1/2 -translate-x-1/2 pointer-events-auto z-30" id="transform-bar">
+<div class="flex items-center gap-1 p-1 rounded-2xl bg-surface-container-low/90 backdrop-blur-2xl ring-1 ring-white/15 shadow-[0_16px_40px_rgba(0,0,0,0.65)]">
+<!-- Selection Mode -->
+<button class="transform-tool-btn px-2.5 py-1.5 rounded-xl text-on-surface hover:bg-surface-container-high transition-all flex items-center gap-1 font-label-md text-label-md" data-tool="select" title="Select mesh part (V) — click a part in the viewport" type="button">
+<span class="material-symbols-outlined text-base">near_me</span>
+<span class="hidden sm:inline">Select</span>
+<kbd class="text-[9px] font-mono opacity-50 ml-0.5">V</kbd>
+</button>
+<!-- Translate / Move -->
+<button class="transform-tool-btn px-2.5 py-1.5 rounded-xl bg-primary-container text-on-primary-container shadow-md font-label-md text-label-md font-medium flex items-center gap-1" data-tool="move" title="Translate Gizmo (G)" type="button">
+<span class="material-symbols-outlined text-base">open_with</span>
+<span class="hidden sm:inline">Move</span>
+<kbd class="text-[9px] font-mono opacity-60 ml-0.5">G</kbd>
+</button>
+<!-- Rotate -->
+<button class="transform-tool-btn px-2.5 py-1.5 rounded-xl text-on-surface hover:bg-surface-container-high transition-all flex items-center gap-1 font-label-md text-label-md" data-tool="rotate" title="Rotate Gizmo (R)" type="button">
+<span class="material-symbols-outlined text-base">rotate_right</span>
+<span class="hidden sm:inline">Rotate</span>
+<kbd class="text-[9px] font-mono opacity-50 ml-0.5">R</kbd>
+</button>
+<!-- Scale -->
+<button class="transform-tool-btn px-2.5 py-1.5 rounded-xl text-on-surface hover:bg-surface-container-high transition-all flex items-center gap-1 font-label-md text-label-md" data-tool="scale" title="Scale Gizmo (S)" type="button">
+<span class="material-symbols-outlined text-base">straighten</span>
+<span class="hidden sm:inline">Scale</span>
+<kbd class="text-[9px] font-mono opacity-50 ml-0.5">S</kbd>
+</button>
+<div class="h-5 w-px bg-white/10 mx-1"></div>
+<!-- Fast Geometric Operations -->
+<button class="px-2.5 py-1.5 rounded-xl text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high transition-all flex items-center gap-1 font-label-sm text-label-sm" id="btn-subdivide" title="Subdivide mesh (4× triangles, midpoint scheme)" type="button">
+<span class="material-symbols-outlined text-base">auto_fix_high</span>
+<span class="hidden md:inline">Subdivide</span>
+</button>
+<button class="px-2.5 py-1.5 rounded-xl text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high transition-all flex items-center gap-1 font-label-sm text-label-sm" id="btn-decimate" title="Decimate to ~50% of current polygons (vertex clustering)" type="button">
+<span class="material-symbols-outlined text-base">compress</span>
+<span class="hidden md:inline">Decimate</span>
+</button>
+<button class="px-2.5 py-1.5 rounded-xl text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high transition-all flex items-center gap-1 font-label-sm text-label-sm" id="btn-mirror" title="Mirror geometry across the X axis" type="button">
+<span class="material-symbols-outlined text-base">flip</span>
+<span class="hidden md:inline">Mirror X</span>
+</button>
+<button class="px-2 py-1.5 rounded-xl text-secondary hover:bg-surface-container-high transition-all flex items-center gap-1 font-label-sm text-label-sm" id="btn-normals" title="Recalculate smooth vertex normals" type="button">
+<span class="material-symbols-outlined text-base">blur_circular</span>
+<span class="hidden lg:inline">Smooth</span>
+</button>
+</div>
+</div>
+</div>
+<!-- RIGHT SIDEBAR: EDITORS & MATERIAL TUNER & DOWNLOAD CARD -->
+<aside class="w-80 xl:w-96 h-full bg-surface-container-low/95 backdrop-blur-2xl flex flex-col justify-between shrink-0 shadow-[-4px_0_24px_rgba(0,0,0,0.5)] z-30 overflow-y-auto" id="right-dock">
+<!-- Top Section: Model Quick Info & Coordinates & Mesh Operations -->
+<div class="p-space-md flex flex-col gap-space-md">
+<!-- Active Model Badge & Format Status -->
+<div class="p-space-sm rounded-xl bg-surface-container-lowest/80 ring-1 ring-white/10 flex flex-col gap-space-xs">
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-space-xs min-w-0">
+<span class="w-2.5 h-2.5 rounded-full bg-secondary shadow-[0_0_8px_#4cd7f6] shrink-0"></span>
+<span class="font-headline-md text-body-md font-semibold text-on-surface truncate" id="insp-model-name">no model loaded</span>
+</div>
+<span class="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-label-sm text-[10px] uppercase font-bold tracking-wider" id="insp-model-format">—</span>
+</div>
+<div class="grid grid-cols-3 gap-1 pt-1 text-center font-label-sm text-label-sm">
+<div class="p-1 rounded bg-surface-container">
+<div class="text-outline text-[9px]">TRIANGLES</div>
+<div class="text-on-surface font-semibold" id="stat-tris-card">0</div>
+</div>
+<div class="p-1 rounded bg-surface-container">
+<div class="text-outline text-[9px]">VERTICES</div>
+<div class="text-on-surface font-semibold" id="stat-verts-card">0</div>
+</div>
+<div class="p-1 rounded bg-surface-container">
+<div class="text-outline text-[9px]">MESHES</div>
+<div class="text-secondary font-semibold" id="stat-meshes-card">0</div>
+</div>
+</div>
+</div>
+<!-- 1. Coordinate Transform Numeric Matrix (X, Y, Z) -->
+<div class="flex flex-col gap-space-xs">
+<div class="flex items-center justify-between text-on-surface-variant font-label-sm text-label-sm uppercase tracking-wider">
+<div class="flex flex-col min-w-0">
+<span class="flex items-center gap-1 font-semibold text-on-surface">
+<span class="material-symbols-outlined text-sm text-primary">transform</span>
+<span>Object Transform</span>
+</span>
+</div>
+<div class="flex items-center gap-1.5 shrink-0">
+<span class="px-1.5 py-0.5 rounded bg-surface-container-high text-on-surface-variant font-label-sm text-label-sm normal-case tracking-normal truncate max-w-[8rem]" id="insp-scope-label" title="Editing scope — click parts with the Select tool">Whole Model</span>
+<button class="text-outline hover:text-secondary text-[11px] underline" id="btn-transform-reset" type="button">Reset All</button>
+</div>
+</div>
+<!-- Position (XYZ) -->
+<div class="flex flex-col gap-1">
+<span class="font-label-sm text-[10px] text-outline">Position (world units)</span>
+<div class="grid grid-cols-3 gap-1.5">
+<div class="flex items-center rounded-lg bg-surface-container-lowest ring-1 ring-white/5 overflow-hidden focus-within:ring-primary/80">
+<span class="px-1.5 py-1 text-[10px] font-mono font-bold text-red-400 bg-red-500/10">X</span>
+<input class="w-full bg-transparent px-1.5 py-1 text-on-surface font-label-sm text-label-sm text-right focus:outline-none" id="pos-x" type="text" value="0.00"/>
+</div>
+<div class="flex items-center rounded-lg bg-surface-container-lowest ring-1 ring-white/5 overflow-hidden focus-within:ring-primary/80">
+<span class="px-1.5 py-1 text-[10px] font-mono font-bold text-emerald-400 bg-emerald-500/10">Y</span>
+<input class="w-full bg-transparent px-1.5 py-1 text-on-surface font-label-sm text-label-sm text-right focus:outline-none" id="pos-y" type="text" value="0.00"/>
+</div>
+<div class="flex items-center rounded-lg bg-surface-container-lowest ring-1 ring-white/5 overflow-hidden focus-within:ring-primary/80">
+<span class="px-1.5 py-1 text-[10px] font-mono font-bold text-cyan-400 bg-cyan-500/10">Z</span>
+<input class="w-full bg-transparent px-1.5 py-1 text-on-surface font-label-sm text-label-sm text-right focus:outline-none" id="pos-z" type="text" value="0.00"/>
+</div>
+</div>
+</div>
+<!-- Rotation (XYZ Deg) -->
+<div class="flex flex-col gap-1 mt-1">
+<span class="font-label-sm text-[10px] text-outline">Rotation (Degrees)</span>
+<div class="grid grid-cols-3 gap-1.5">
+<div class="flex items-center rounded-lg bg-surface-container-lowest ring-1 ring-white/5 overflow-hidden focus-within:ring-primary/80">
+<span class="px-1.5 py-1 text-[10px] font-mono font-bold text-red-400 bg-red-500/10">X</span>
+<input class="w-full bg-transparent px-1.5 py-1 text-on-surface font-label-sm text-label-sm text-right focus:outline-none" id="rot-x" type="text" value="0.0°"/>
+</div>
+<div class="flex items-center rounded-lg bg-surface-container-lowest ring-1 ring-white/5 overflow-hidden focus-within:ring-primary/80">
+<span class="px-1.5 py-1 text-[10px] font-mono font-bold text-emerald-400 bg-emerald-500/10">Y</span>
+<input class="w-full bg-transparent px-1.5 py-1 text-on-surface font-label-sm text-label-sm text-right focus:outline-none" id="rot-y" type="text" value="0.0°"/>
+</div>
+<div class="flex items-center rounded-lg bg-surface-container-lowest ring-1 ring-white/5 overflow-hidden focus-within:ring-primary/80">
+<span class="px-1.5 py-1 text-[10px] font-mono font-bold text-cyan-400 bg-cyan-500/10">Z</span>
+<input class="w-full bg-transparent px-1.5 py-1 text-on-surface font-label-sm text-label-sm text-right focus:outline-none" id="rot-z" type="text" value="0.0°"/>
+</div>
+</div>
+</div>
+<!-- Pivot Align Utilities -->
+<div class="grid grid-cols-2 gap-1.5 pt-1">
+<button class="px-2 py-1.5 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface text-[11px] font-body-sm flex items-center justify-center gap-1 transition-colors" id="btn-center-pivot" type="button">
+<span class="material-symbols-outlined text-sm">filter_center_focus</span>
+<span>Center Pivot</span>
+</button>
+<button class="px-2 py-1.5 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface text-[11px] font-body-sm flex items-center justify-center gap-1 transition-colors" id="btn-ground" type="button">
+<span class="material-symbols-outlined text-sm">vertical_align_bottom</span>
+<span>Ground to Floor</span>
+</button>
+</div>
+</div>
+<div class="w-full h-px bg-white/10"></div>
+<!-- 2. Simple Mesh Geometry Modifiers -->
+<div class="flex flex-col gap-space-xs">
+<div class="flex items-center justify-between text-on-surface-variant font-label-sm text-label-sm uppercase tracking-wider">
+<span class="flex items-center gap-1 font-semibold text-on-surface">
+<span class="material-symbols-outlined text-sm text-secondary">tune</span>
+<span>Mesh Geometry Tuning</span>
+</span>
+</div>
+<!-- Polycount Decimation / Web Optimizer -->
+<div class="flex flex-col gap-1">
+<div class="flex items-center justify-between text-on-surface-variant font-body-sm text-body-sm">
+<span class="text-on-surface">Poly Decimation / Web Opt</span>
+<span class="font-label-sm text-label-sm text-secondary font-semibold" id="poly-ratio-display">100% (Original)</span>
+</div>
+<input class="w-full h-1.5 bg-surface-container-highest rounded-lg appearance-none cursor-pointer accent-secondary" id="poly-slider" max="100" min="10" type="range" value="100"/>
+<div class="flex justify-between text-[10px] font-label-sm text-outline">
+<span id="poly-hint-low">10%</span>
+<span id="poly-hint-mid">50%</span>
+<span>100% Full</span>
+</div>
+</div>
+<!-- Scale Factor Slider -->
+<div class="flex flex-col gap-1 mt-1">
+<div class="flex items-center justify-between text-on-surface-variant font-body-sm text-body-sm">
+<span class="text-on-surface">Scale Uniform</span>
+<span class="font-label-sm text-label-sm text-primary font-semibold" id="scale-display">1.00x</span>
+</div>
+<input class="w-full h-1.5 bg-surface-container-highest rounded-lg appearance-none cursor-pointer accent-primary" id="scale-slider" max="300" min="10" type="range" value="100"/>
+</div>
+<!-- Auto-Fix Inverted Normals Toggle -->
+<div class="flex items-center justify-between pt-1">
+<div class="flex flex-col">
+<span class="font-body-sm text-body-sm text-on-surface">Auto-Fix Face Normals</span>
+<span class="font-label-sm text-[10px] text-outline">Recompute smooth normals after every edit</span>
+</div>
+<label class="relative inline-flex items-center cursor-pointer">
+<input checked="" class="sr-only peer" id="chk-autonormals" type="checkbox"/>
+<div class="w-9 h-5 bg-surface-container-highest peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-secondary"></div>
+</label>
+</div>
+</div>
+<div class="w-full h-px bg-white/10"></div>
+<!-- 3. Material & PBR Aesthetics Editor -->
+<div class="flex flex-col gap-space-xs">
+<div class="flex items-center justify-between text-on-surface-variant font-label-sm text-label-sm uppercase tracking-wider">
+<span class="flex items-center gap-1 font-semibold text-on-surface">
+<span class="material-symbols-outlined text-sm text-tertiary">palette</span>
+<span>Material &amp; Shaders</span>
+</span>
+</div>
+<!-- Preset Selector Chips -->
+<div class="grid grid-cols-2 gap-1.5">
+<button class="mat-preset-btn px-2 py-1.5 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface font-label-sm text-label-sm text-left flex items-center gap-1.5 transition-colors" data-preset="cyberpunk" type="button">
+<span class="w-2.5 h-2.5 rounded-full bg-[#8b5cf6] border border-white/40"></span>
+<span class="truncate">Cyberpunk Gloss</span>
+</button>
+<button class="mat-preset-btn px-2 py-1.5 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface font-label-sm text-label-sm text-left flex items-center gap-1.5 transition-colors" data-preset="ceramic" type="button">
+<span class="w-2.5 h-2.5 rounded-full bg-slate-300"></span>
+<span class="truncate">Matte Ceramic</span>
+</button>
+<button class="mat-preset-btn px-2 py-1.5 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface font-label-sm text-label-sm text-left flex items-center gap-1.5 transition-colors" data-preset="chrome" type="button">
+<span class="w-2.5 h-2.5 rounded-full bg-cyan-300"></span>
+<span class="truncate">Liquid Chrome</span>
+</button>
+<button class="mat-preset-btn px-2 py-1.5 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface font-label-sm text-label-sm text-left flex items-center gap-1.5 transition-colors" data-preset="gold" type="button">
+<span class="w-2.5 h-2.5 rounded-full bg-amber-400"></span>
+<span class="truncate">Iridescent Gold</span>
+</button>
+</div>
+<!-- Detailed Sliders: Roughness & Metallic & Emission -->
+<div class="flex flex-col gap-2 pt-1">
+<div class="flex items-center justify-between">
+<span class="font-body-sm text-body-sm text-on-surface-variant">Roughness</span>
+<div class="flex items-center gap-2 w-36">
+<input class="w-full h-1 bg-surface-container-highest rounded appearance-none accent-primary" id="slider-rough" max="100" min="0" type="range" value="50"/>
+<span class="font-label-sm text-label-sm text-on-surface font-mono w-8 text-right" id="val-rough">0.50</span>
+</div>
+</div>
+<div class="flex items-center justify-between">
+<span class="font-body-sm text-body-sm text-on-surface-variant">Metallic</span>
+<div class="flex items-center gap-2 w-36">
+<input class="w-full h-1 bg-surface-container-highest rounded appearance-none accent-primary" id="slider-metal" max="100" min="0" type="range" value="10"/>
+<span class="font-label-sm text-label-sm text-on-surface font-mono w-8 text-right" id="val-metal">0.10</span>
+</div>
+</div>
+<div class="flex items-center justify-between">
+<span class="font-body-sm text-body-sm text-on-surface-variant">Emission Glow</span>
+<div class="flex items-center gap-2 w-36">
+<input class="w-full h-1 bg-surface-container-highest rounded appearance-none accent-secondary" id="slider-emis" max="100" min="0" type="range" value="0"/>
+<span class="font-label-sm text-label-sm text-secondary font-mono w-8 text-right" id="val-emis">0.00</span>
+</div>
+</div>
+</div>
+</div>
+</div>
+<!-- BOTTOM EXPORT ACTION DOCK -->
+<div class="p-space-md bg-surface-container/80 border-t border-white/10 flex flex-col gap-space-sm">
+<!-- Format Selector Tabs -->
+<div class="flex flex-col gap-1">
+<div class="flex items-center justify-between font-label-sm text-label-sm text-on-surface-variant">
+<span>Target Export Format</span>
+<span class="text-secondary font-mono">edits applied • print ready</span>
+</div>
+<div class="grid grid-cols-4 gap-1 p-0.5 rounded-lg bg-surface-container-lowest">
+<button class="export-format-btn py-1 rounded text-center font-label-sm text-label-sm bg-primary-container text-on-primary-container font-semibold" data-fmt="obj" type="button">.OBJ</button>
+<button class="export-format-btn py-1 rounded text-center font-label-sm text-label-sm text-on-surface-variant hover:text-on-surface" data-fmt="glb" type="button">.GLB</button>
+<button class="export-format-btn py-1 rounded text-center font-label-sm text-label-sm text-on-surface-variant" data-disabled="1" data-fmt="fbx" title="FBX writing isn’t possible in the browser — use GLB (opens in Blender, Unity, Unreal…)" type="button">.FBX</button>
+<button class="export-format-btn py-1 rounded text-center font-label-sm text-label-sm text-on-surface-variant hover:text-on-surface" data-fmt="stl" type="button">.STL</button>
+</div>
+</div>
+<p class="font-label-sm text-label-sm text-outline px-1 leading-relaxed">Exports include your edits (transform, geometry, materials). FBX export isn’t supported in-browser — GLB is the universal alternative.</p>
+<!-- Master Download Action Button -->
+<button class="w-full py-2.5 px-4 rounded-xl bg-primary text-on-primary font-headline-md text-body-md font-semibold flex items-center justify-center gap-2 shadow-[0_0_24px_rgba(208,188,255,0.4)] hover:shadow-[0_0_32px_rgba(208,188,255,0.6)] hover:bg-primary-fixed-dim transition-all active:scale-[0.98] disabled:opacity-60" id="btn-download" type="button">
+<span class="material-symbols-outlined text-lg">download</span>
+<span id="btn-download-label">Download Model (OBJ)</span>
+</button>
+<button class="w-full py-1.5 px-3 rounded-lg bg-surface-container-high hover:bg-surface-bright text-on-surface text-body-sm font-medium flex items-center justify-center gap-1.5 transition-colors" id="btn-download-original" type="button">
+<span class="material-symbols-outlined text-base text-secondary">history</span>
+<span id="btn-download-original-label">Download Original File</span>
+</button>
+</div>
+</aside>
+</div>
+</div>
+<!-- Preview mode exit -->
+<button class="fixed bottom-4 right-4 z-[60] items-center gap-1.5 px-3 py-2 rounded-xl bg-surface-container-low/90 backdrop-blur-xl ring-1 ring-white/15 shadow-2xl text-on-surface font-body-sm text-body-sm hover:bg-surface-container-high transition-colors" id="btn-exit-preview" type="button"><span class="material-symbols-outlined text-base">close_fullscreen</span>Exit Preview (Esc)</button>
+<input accept=".obj,.fbx,.glb,.gltf,.stl,.ply,.dae,.3mf,.blend,.mtl,.bin,.png,.jpg,.jpeg,.webp,.bmp,.tga" class="hidden" id="file-input" multiple type="file"/>
+</main></div>
+<script type="module" src="app.js"></script></body></html>
