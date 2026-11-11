@@ -498,6 +498,80 @@ async function handleFiles(fileList) {
   }
 }
 
+/* Convert legacy (Phong / Lambert / Basic …) materials to PBR so the
+   color, roughness, metallic and emission controls all work (OBJ/MTL, FBX, DAE). */
+function toStandardMaterial(m, cache) {
+  if (Array.isArray(m)) return m.map((x) => toStandardMaterial(x, cache));
+  if (!m || m.isMeshStandardMaterial || m.isShaderMaterial || m.isPointsMaterial || m.isLineBasicMaterial) return m;
+  if (cache && cache.has(m)) return cache.get(m);
+  const p = {
+    name: m.name,
+    color: m.color ? m.color.clone() : new THREE.Color(0xb9c0d4),
+    map: m.map || null,
+    normalMap: m.normalMap || null,
+    bumpMap: m.bumpMap || null,
+    bumpScale: m.bumpScale ?? 1,
+    alphaMap: m.alphaMap || null,
+    aoMap: m.aoMap || null,
+    emissive: m.emissive ? m.emissive.clone() : new THREE.Color(0),
+    emissiveMap: m.emissiveMap || null,
+    emissiveIntensity: m.emissiveIntensity ?? 1,
+    opacity: m.opacity ?? 1,
+    transparent: !!m.transparent,
+    alphaTest: m.alphaTest || 0,
+    side: m.side ?? THREE.FrontSide,
+    vertexColors: !!m.vertexColors,
+    flatShading: !!m.flatShading,
+    metalness: 0.05,
+    roughness: m.isMeshPhongMaterial ? clamp(1 - Math.min((m.shininess ?? 30) / 100, 1) * 0.6, 0.25, 0.95) : 0.8,
+  };
+  if (m.normalScale) p.normalScale = m.normalScale.clone();
+  const out = new THREE.MeshStandardMaterial(p);
+  if (cache) cache.set(m, out);
+  return out;
+}
+
+// Move a mesh's geometry so its local origin is at the geometry's bbox center, without moving it visually.
+// Mutates geometry in place — only call on geometry that no history snapshot references.
+function centerGeometryPivot(mesh) {
+  const g = mesh.geometry;
+  g.computeBoundingBox();
+  if (!g.boundingBox || g.boundingBox.isEmpty()) return;
+  const c = g.boundingBox.getCenter(new THREE.Vector3());
+  if (c.lengthSq() < 1e-14) return;
+  g.translate(-c.x, -c.y, -c.z);
+  mesh.position.add(c.multiply(mesh.scale).applyQuaternion(mesh.quaternion));
+  mesh.updateMatrix();
+}
+
+const origTransforms = new WeakMap();
+function rememberOrigTransform(o) {
+  origTransforms.set(o, { pos: o.position.clone(), quat: o.quaternion.clone(), scale: o.scale.clone() });
+}
+
+// Shift an object by a world-space offset regardless of its parent's transform
+function moveWorld(obj, delta) {
+  const wp = obj.getWorldPosition(new THREE.Vector3()).add(delta);
+  if (obj.parent) { obj.parent.updateWorldMatrix(true, false); obj.parent.worldToLocal(wp); }
+  obj.position.copy(wp);
+  obj.updateMatrixWorld(true);
+}
+
+function cloneMaterial(m) {
+  if (Array.isArray(m)) return m.map((x) => (x && x.clone ? x.clone() : x));
+  return m && m.clone ? m.clone() : m;
+}
+
+function recOf(mesh) { return state.meshes.find((r) => r.mesh === mesh) || null; }
+
+// The object the gizmo & transform inputs act on: the selected part, or the whole model
+function transformTarget() {
+  if (!state.modelRoot) return null;
+  const rec = state.scope ? recOf(state.scope) : null;
+  if (rec && !rec.mesh.isSkinnedMesh) return rec.mesh;
+  return state.modelRoot;
+}
+
 function setModel(object, format) {
   clearModel(false);
 
@@ -510,23 +584,41 @@ function setModel(object, format) {
   root.name = state.baseName || 'model';
   root.add(object);
   scene.add(root);
+  rememberOrigTransform(root);
   state.modelRoot = root;
   state.format = format;
   state.scope = null;
   state.activePreset = null;
 
   let idx = 0;
+  const found = [];
   object.traverse((o) => {
-    if ((o.isMesh || o.isPoints) && o.geometry && o.geometry.getAttribute('position')) {
-      const isPoints = !!o.isPoints;
-      if (!isPoints && !o.geometry.getAttribute('normal')) o.geometry.computeVertexNormals();
-      if (!o.name) o.name = (isPoints ? 'points_' : 'mesh_') + (++idx);
-      const editable = !isPoints && !o.isSkinnedMesh &&
-        !o.geometry.getAttribute('skinIndex') &&
-        !(o.morphTargetInfluences && o.morphTargetInfluences.length);
-      state.meshes.push({ mesh: o, baseMaterial: o.material, baseline: o.geometry, pct: 100, editable, isPoints });
-    }
+    if ((o.isMesh || o.isPoints) && o.geometry && o.geometry.getAttribute('position')) found.push(o);
   });
+  const matCache = new Map();
+  const centeredGeos = new Set();
+  const usedNames = new Set();
+  for (const o of found) {
+    const isPoints = !!o.isPoints;
+    if (!isPoints && !o.geometry.getAttribute('normal')) o.geometry.computeVertexNormals();
+    let nm = o.name || (isPoints ? 'points_' : 'mesh_') + (++idx);
+    if (usedNames.has(nm)) { let k = 2; while (usedNames.has(`${nm}_${k}`)) k++; nm = `${nm}_${k}`; }
+    usedNames.add(nm);
+    o.name = nm;
+    const editable = !isPoints && !o.isSkinnedMesh &&
+      !o.geometry.getAttribute('skinIndex') &&
+      !(o.morphTargetInfluences && o.morphTargetInfluences.length);
+    if (!isPoints) o.material = toStandardMaterial(o.material, matCache);
+    // Give each editable part its own pivot at its center, so the gizmo sits ON the part
+    // (OBJ parts all have their origin at the world origin otherwise).
+    if (editable) {
+      if (centeredGeos.has(o.geometry)) o.geometry = o.geometry.clone();
+      centerGeometryPivot(o);
+      centeredGeos.add(o.geometry);
+    }
+    rememberOrigTransform(o);
+    state.meshes.push({ mesh: o, baseMaterial: o.material, baseline: o.geometry, pct: 100, editable, isPoints });
+  }
 
   if (!state.meshes.length) {
     clearModel();
@@ -548,6 +640,8 @@ function setModel(object, format) {
   historyReset();
   updateEmptyState();
   setStatus('Ready', true);
+  // The drop box has done its job — get it out of the way (reopen from the left viewport toolbar)
+  if (typeof setPanel === 'function' && ui.tray) setPanel('tray', false);
 }
 
 function clearModel(updateUI = true) {
@@ -578,6 +672,8 @@ function clearModel(updateUI = true) {
     syncMaterialSliders();
     syncPolySliderUI();
     syncTransformInputs();
+    $('insp-scope-label').textContent = $('mat-scope-label').textContent = 'Whole Model';
+    updatePartButtons();
   }
 }
 
@@ -666,42 +762,84 @@ function buildOutliner() {
   const list = $('outliner-list');
   if (!list) return;
   list.innerHTML = '';
-  const addRow = (label, icon, count, active, onclick, title) => {
-    const row = document.createElement('button');
-    row.type = 'button';
-    row.className = `flex items-center gap-space-sm px-space-sm py-2 rounded transition-all text-left font-body-sm text-body-sm w-full ${active ? 'bg-primary-container text-on-primary-container font-medium' : 'text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface'}`;
-    row.innerHTML = `<span class="material-symbols-outlined text-lg shrink-0">${icon}</span><span class="flex-1 truncate">${escapeHTML(label)}</span>` +
+  const addRow = ({ label, icon, count, active, onclick, title, mesh, dim }) => {
+    const row = document.createElement('div');
+    row.className = `group flex items-center rounded transition-all font-body-sm text-body-sm w-full ${active ? 'bg-primary-container text-on-primary-container font-medium' : 'text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface'} ${dim ? 'opacity-50' : ''}`;
+    const main = document.createElement('button');
+    main.type = 'button';
+    main.className = 'flex-1 min-w-0 flex items-center gap-space-sm px-space-sm py-2 text-left';
+    main.innerHTML = `<span class="material-symbols-outlined text-lg shrink-0">${icon}</span><span class="flex-1 truncate">${escapeHTML(label)}</span>` +
       (count != null ? `<span class="font-label-sm text-label-sm ${active ? 'text-on-primary-container/70' : 'text-outline'} shrink-0">${count}</span>` : '');
-    if (title) row.title = title;
-    if (onclick) row.addEventListener('click', onclick);
+    if (title) main.title = title;
+    if (onclick) main.addEventListener('click', onclick);
+    row.appendChild(main);
+    if (mesh) {
+      main.addEventListener('dblclick', (e) => { e.preventDefault(); renamePart(mesh); });
+      const mk = (ic, tip, fn, extra = '') => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = `p-1 rounded shrink-0 hover:bg-black/20 ${extra}`;
+        b.title = tip;
+        b.innerHTML = `<span class="material-symbols-outlined text-base">${ic}</span>`;
+        b.addEventListener('click', (e) => { e.stopPropagation(); fn(); });
+        row.appendChild(b);
+      };
+      mk(mesh.visible ? 'visibility' : 'visibility_off', mesh.visible ? 'Hide this part' : 'Show this part', () => toggleVisibility(mesh), mesh.visible ? 'opacity-60 group-hover:opacity-100' : '');
+      mk('delete', 'Delete this part', () => { setScope(mesh); opDelete(); }, 'opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-red-300 mr-0.5');
+    }
     list.appendChild(row);
+    return row;
   };
   if (!state.modelRoot) {
-    addRow('Empty scene — drop a model', 'hourglass_empty', null, false, null);
+    addRow({ label: 'Empty scene — drop a model', icon: 'hourglass_empty' });
     return;
   }
-  addRow('Whole Model', 'view_in_ar', fmtK(modelStats().tris), state.scope === null, () => setScope(null), 'Edit the whole model');
-  state.meshes.slice(0, 120).forEach((rec) => {
-    addRow(
-      rec.mesh.name || 'mesh',
-      rec.isPoints ? 'grain' : 'deployed_code',
-      rec.isPoints ? fmtK(meshVerts(rec)) : fmtK(meshTris(rec)),
-      state.scope === rec.mesh,
-      () => setScope(rec.mesh),
-      rec.editable ? 'Click to focus this part' : 'Display-only (skinned / points)'
-    );
+  addRow({ label: 'Whole Model', icon: 'view_in_ar', count: fmtK(modelStats().tris), active: state.scope === null, onclick: () => setScope(null), title: 'Edit the whole model' });
+  let activeRow = null;
+  state.meshes.forEach((rec) => {
+    const row = addRow({
+      label: rec.mesh.name || 'mesh',
+      icon: rec.isPoints ? 'grain' : 'deployed_code',
+      count: rec.isPoints ? fmtK(meshVerts(rec)) : fmtK(meshTris(rec)),
+      active: state.scope === rec.mesh,
+      onclick: () => setScope(rec.mesh),
+      title: (rec.editable ? 'Click to select this part · double-click to rename' : 'Display-only geometry (skinned / points) · double-click to rename'),
+      mesh: rec.mesh,
+      dim: !rec.mesh.visible,
+    });
+    if (state.scope === rec.mesh) activeRow = row;
   });
-  if (state.meshes.length > 120) addRow(`… ${state.meshes.length - 120} more parts`, 'more_horiz', null, false, null);
+  if (activeRow) activeRow.scrollIntoView({ block: 'nearest' });
 }
 
 function setScope(mesh) {
   state.scope = mesh;
-  $('insp-scope-label').textContent = mesh ? (mesh.name || 'part') : 'Whole Model';
+  const label = mesh ? (mesh.name || 'part') : 'Whole Model';
+  $('insp-scope-label').textContent = label;
+  $('mat-scope-label').textContent = label;
+  $('insp-scope-label').title = $('mat-scope-label').title = label;
+  attachGizmo();
   buildOutliner();
   updateSelBox();
+  syncTransformInputs();
   syncMaterialSliders();
   syncPolySliderUI();
   refreshStats();
+  updatePartButtons();
+}
+
+function updatePartButtons() {
+  const has = !!state.scope;
+  ['btn-duplicate', 'btn-hide', 'btn-delete'].forEach((id) => {
+    const b = $(id);
+    b.classList.toggle('opacity-40', !has);
+    b.title = b.title.replace(/ — select a part first$/, '') + (has ? '' : ' — select a part first');
+  });
+  const hideBtn = $('btn-hide');
+  const hidden = has && !state.scope.visible;
+  hideBtn.querySelector('.material-symbols-outlined').textContent = hidden ? 'visibility' : 'visibility_off';
+  const lbl = hideBtn.querySelector('span:not(.material-symbols-outlined)');
+  if (lbl) lbl.textContent = hidden ? 'Show' : 'Hide';
 }
 
 function updateSelBox() {
@@ -715,25 +853,35 @@ function updateSelBox() {
 
 // Click-to-select (Select tool)
 const raycaster = new THREE.Raycaster();
+let selectHintShown = false;
 let downPos = null;
-canvas.addEventListener('pointerdown', (e) => { downPos = [e.clientX, e.clientY]; });
+let downOnGizmo = false;
+canvas.addEventListener('pointerdown', (e) => {
+  downPos = [e.clientX, e.clientY];
+  downOnGizmo = !!(tc.object && tc.axis);
+}, true);
 canvas.addEventListener('pointerup', (e) => {
   if (!downPos) return;
   const moved = Math.hypot(e.clientX - downPos[0], e.clientY - downPos[1]);
   downPos = null;
-  if (moved > 5 || state.tool !== 'select' || !state.modelRoot) return;
+  if (moved > 5 || downOnGizmo || e.button !== 0 || !state.modelRoot) return;
   const rect = canvas.getBoundingClientRect();
   const ndc = new THREE.Vector2(
     ((e.clientX - rect.left) / rect.width) * 2 - 1,
     -((e.clientY - rect.top) / rect.height) * 2 + 1
   );
   raycaster.setFromCamera(ndc, activeCam);
-  const targets = state.meshes.filter((r) => !r.isPoints).map((r) => r.mesh);
+  const targets = state.meshes.filter((r) => !r.isPoints && r.mesh.visible).map((r) => r.mesh);
   const hits = raycaster.intersectObjects(targets, false);
   if (hits.length) {
+    if (state.scope === hits[0].object) return;
     setScope(hits[0].object);
-    toast(`Selected <b>${escapeHTML(hits[0].object.name || 'part')}</b> — material & geometry edits now target this part.`, 'info', 2600);
-  } else {
+    if (!selectHintShown) {
+      selectHintShown = true;
+      const extra = state.meshes.length <= 1 ? ' This model is a single mesh — click <b>Split Parts</b> in the bottom toolbar to break it into separately editable pieces.' : '';
+      toast(`Selected <b>${escapeHTML(hits[0].object.name || 'part')}</b>. Move / Rotate / Scale, color, Duplicate, Hide and Delete now act on this part only. Click empty space (or press Esc) to go back to the whole model.${extra}`, 'info', 7000);
+    }
+  } else if (state.scope) {
     setScope(null);
   }
 });
@@ -746,12 +894,7 @@ const TOOL_MODE = { select: null, move: 'translate', rotate: 'rotate', scale: 's
 function setTool(tool, force) {
   if (!force && tool === state.tool) return;
   state.tool = tool;
-  if (state.modelRoot && TOOL_MODE[tool]) {
-    tc.attach(state.modelRoot);
-    tc.setMode(TOOL_MODE[tool]);
-  } else {
-    tc.detach();
-  }
+  attachGizmo();
   document.querySelectorAll('.transform-tool-btn').forEach((b) => {
     const on = b.dataset.tool === tool;
     b.classList.toggle('bg-primary-container', on);
@@ -762,24 +905,39 @@ function setTool(tool, force) {
   });
 }
 
+function attachGizmo() {
+  const target = transformTarget();
+  if (target && TOOL_MODE[state.tool]) {
+    if (tc.object !== target) tc.attach(target);
+    tc.setMode(TOOL_MODE[state.tool]);
+  } else {
+    tc.detach();
+  }
+}
+
 function syncTransformInputs() {
-  if (!state.modelRoot) return;
-  const r = state.modelRoot;
+  const r = transformTarget();
+  if (!r) return;
   $('pos-x').value = r.position.x.toFixed(2);
   $('pos-y').value = r.position.y.toFixed(2);
   $('pos-z').value = r.position.z.toFixed(2);
   $('rot-x').value = THREE.MathUtils.radToDeg(r.rotation.x).toFixed(1) + '°';
   $('rot-y').value = THREE.MathUtils.radToDeg(r.rotation.y).toFixed(1) + '°';
   $('rot-z').value = THREE.MathUtils.radToDeg(r.rotation.z).toFixed(1) + '°';
+  $('scl-x').value = r.scale.x.toFixed(2);
+  $('scl-y').value = r.scale.y.toFixed(2);
+  $('scl-z').value = r.scale.z.toFixed(2);
   const s = (Math.abs(r.scale.x) + Math.abs(r.scale.y) + Math.abs(r.scale.z)) / 3;
   $('scale-slider').value = Math.round(clamp(s, 0.1, 3) * 100);
   $('scale-display').textContent = s.toFixed(2) + 'x';
 }
 
 function commitTransformFromInputs() {
-  if (!state.modelRoot) return;
-  const num = (v) => { const n = parseFloat(String(v).replace(/[^0-9.eE+-]/g, '')); return isFinite(n) ? n : 0; };
-  const r = state.modelRoot;
+  const r = transformTarget();
+  if (!r) return;
+  const num = (v, d = 0) => { const n = parseFloat(String(v).replace(/[^0-9.eE+-]/g, '')); return isFinite(n) ? n : d; };
+  const sc = (v) => { const n = num(v, 1); return Math.abs(n) < 1e-4 ? 1e-4 : n; };
+  r.scale.set(sc($('scl-x').value), sc($('scl-y').value), sc($('scl-z').value));
   r.position.set(num($('pos-x').value), num($('pos-y').value), num($('pos-z').value));
   r.rotation.set(
     THREE.MathUtils.degToRad(num($('rot-x').value)),
@@ -793,6 +951,17 @@ function commitTransformFromInputs() {
 
 function centerPivot() {
   if (!state.modelRoot) return toast('Load a model first.', 'warn');
+  const target = transformTarget();
+  if (target !== state.modelRoot) {
+    const rec = recOf(target);
+    if (!rec || rec.isPoints || !rec.editable) return toast('This part’s pivot can’t be changed (skinned / point geometry).', 'warn');
+    const g = rec.mesh.geometry.clone(); // never mutate geometry that undo history references
+    rec.mesh.geometry = g;
+    centerGeometryPivot(rec.mesh);
+    rec.baseline = g; rec.pct = 100;
+    attachGizmo(); syncTransformInputs(); updateSelBox(); syncPolySliderUI(); pushHistory();
+    return toast(`Pivot of <b>${escapeHTML(target.name)}</b> moved to its center — it now rotates & scales around itself.`, 'success', 3000);
+  }
   const box = new THREE.Box3().setFromObject(state.modelRoot);
   if (box.isEmpty()) return;
   const c = box.getCenter(new THREE.Vector3());
@@ -802,11 +971,12 @@ function centerPivot() {
 }
 function groundToFloor() {
   if (!state.modelRoot) return toast('Load a model first.', 'warn');
-  const box = new THREE.Box3().setFromObject(state.modelRoot);
+  const target = transformTarget();
+  const box = new THREE.Box3().setFromObject(target);
   if (box.isEmpty()) return;
-  state.modelRoot.position.y -= box.min.y;
+  moveWorld(target, new THREE.Vector3(0, -box.min.y, 0));
   syncTransformInputs(); updateSelBox(); pushHistory();
-  toast('Grounded — the model now sits on the grid (y = 0).', 'success', 2600);
+  toast(target === state.modelRoot ? 'Grounded — the model now sits on the grid (y = 0).' : `Grounded <b>${escapeHTML(target.name)}</b> onto the grid (y = 0).`, 'success', 2600);
 }
 
 /* ------------------------------------------------------------------ */
@@ -822,7 +992,62 @@ function scopeStats() {
 }
 function scopeName() { return state.scope ? (state.scope.name || 'part') : 'whole model'; }
 
+// Materials are often shared between parts (OBJ/MTL, glTF). Before editing a single part,
+// give it its own copy so the change doesn't leak onto other parts.
+function makeScopeMaterialsUnique() {
+  if (!state.scope) return;
+  const rec = recOf(state.scope);
+  if (!rec || rec.isPoints) return;
+  const mine = Array.isArray(rec.baseMaterial) ? rec.baseMaterial : [rec.baseMaterial];
+  const shared = state.meshes.some((r) => r !== rec &&
+    (Array.isArray(r.baseMaterial) ? r.baseMaterial : [r.baseMaterial]).some((m) => mine.includes(m)));
+  if (!shared) return;
+  rec.baseMaterial = cloneMaterial(rec.baseMaterial);
+  if (state.viewMode === 'pbr') rec.mesh.material = rec.baseMaterial;
+}
+
+function eachScopeMaterial(fn) {
+  makeScopeMaterialsUnique();
+  let touched = 0;
+  for (const rec of scopeRecs()) {
+    if (rec.isPoints) continue;
+    const mats = Array.isArray(rec.baseMaterial) ? rec.baseMaterial : [rec.baseMaterial];
+    for (const m of mats) { if (m) { fn(m); touched++; } }
+  }
+  return touched;
+}
+
+function applyColor(hex) {
+  if (!state.modelRoot) return toast('Load a model first.', 'warn');
+  if (state.viewMode !== 'pbr') setViewMode('pbr');
+  eachScopeMaterial((m) => { if (m.color) { m.color.set(hex); m.needsUpdate = true; } });
+  state.activePreset = null;
+  updatePresetChips();
+  $('mat-color').value = hex;
+  $('mat-color-hex').value = hex;
+}
+
+function applyOpacity(v) {
+  if (!state.modelRoot) return;
+  if (state.viewMode !== 'pbr') setViewMode('pbr');
+  eachScopeMaterial((m) => {
+    m.opacity = v;
+    m.transparent = v < 1;
+    m.depthWrite = v >= 1;
+    m.needsUpdate = true;
+  });
+}
+
+function removeTextures() {
+  if (!state.modelRoot) return toast('Load a model first.', 'warn');
+  let n = 0;
+  eachScopeMaterial((m) => { if (m.map) { m.map = null; m.needsUpdate = true; n++; } });
+  if (n) { if (state.viewMode !== 'pbr') setViewMode('pbr'); pushHistory(); toast(`Removed the color texture from ${scopeName()} — the plain color is now visible.`, 'success', 3000); }
+  else toast(`${scopeName()} has no color texture.`, 'info', 2400);
+}
+
 function eachScopePBRMaterial(fn) {
+  makeScopeMaterialsUnique();
   let touched = 0;
   for (const rec of scopeRecs()) {
     const mats = Array.isArray(rec.baseMaterial) ? rec.baseMaterial : [rec.baseMaterial];
@@ -904,13 +1129,21 @@ function syncMaterialSliders() {
     if (m) break;
   }
   if (!m) return;
+  if (m.color) {
+    const hex = '#' + m.color.getHexString();
+    $('mat-color').value = hex;
+    $('mat-color-hex').value = hex;
+  }
+  $('slider-opacity').value = Math.round(clamp(m.opacity ?? 1, 0.05, 1) * 100);
+  $('val-opacity').textContent = (m.opacity ?? 1).toFixed(2);
   const set = (sliderId, valId, v) => {
     const s = $(sliderId); s.value = Math.round(clamp(v, 0, 1) * 100);
     $(valId).textContent = (s.value / 100).toFixed(2);
   };
   set('slider-rough', 'val-rough', m.roughness ?? 0.5);
   set('slider-metal', 'val-metal', m.metalness ?? 0);
-  set('slider-emis', 'val-emis', (m.emissiveIntensity ?? 0) / 2);
+  const glowing = m.emissive && m.emissive.getHex() !== 0;
+  set('slider-emis', 'val-emis', glowing ? (m.emissiveIntensity ?? 0) / 2 : 0);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1238,6 +1471,224 @@ function syncPolySliderUI() {
 }
 
 /* ------------------------------------------------------------------ */
+/* Part operations: delete / duplicate / hide / rename / split         */
+/* ------------------------------------------------------------------ */
+
+function requirePart(action) {
+  if (!state.modelRoot) { toast('Load a model first.', 'warn'); return null; }
+  if (!state.scope) {
+    toast(`Select a part first to ${action} it — click it in the viewport or in the Outliner (left panel).` +
+      (state.meshes.length <= 1 ? ' This model is one single mesh: use <b>Split Parts</b> to break it into pieces.' : ''), 'warn', 6000);
+    return null;
+  }
+  return recOf(state.scope);
+}
+
+function uniquePartName(base) {
+  const names = new Set(state.meshes.map((r) => r.mesh.name));
+  if (!names.has(base)) return base;
+  let k = 2;
+  while (names.has(`${base}_${k}`)) k++;
+  return `${base}_${k}`;
+}
+
+function opDelete() {
+  const rec = requirePart('delete');
+  if (!rec) return;
+  if (state.meshes.length <= 1) return toast('That’s the only part left — use <b>New Scene</b> in the header to clear everything.', 'warn', 5000);
+  const name = rec.mesh.name;
+  if (rec.mesh.parent) rec.mesh.parent.remove(rec.mesh);
+  state.meshes = state.meshes.filter((r) => r !== rec);
+  setScope(null);
+  refreshStats();
+  pushHistory();
+  toast(`Deleted <b>${escapeHTML(name)}</b>. Press <b>Ctrl+Z</b> to undo.`, 'success', 3500);
+}
+
+function opDuplicate() {
+  const rec = requirePart('duplicate');
+  if (!rec) return;
+  if (rec.mesh.isSkinnedMesh) return toast('Animated (skinned) parts can’t be duplicated.', 'warn');
+  const src = rec.mesh;
+  const copy = src.clone(false);
+  copy.material = cloneMaterial(rec.baseMaterial);
+  copy.name = uniquePartName(src.name + '_copy');
+  src.parent.add(copy);
+  // offset the copy sideways by ~its own width so it doesn't overlap the original
+  const size = new THREE.Box3().setFromObject(src).getSize(new THREE.Vector3());
+  moveWorld(copy, new THREE.Vector3(Math.max(size.x * 1.1, (state.modelRadius || 1) * 0.05), 0, 0));
+  rememberOrigTransform(copy);
+  state.meshes.push({ mesh: copy, baseMaterial: copy.material, baseline: rec.baseline, pct: rec.pct, editable: rec.editable, isPoints: rec.isPoints });
+  setViewMode(state.viewMode);
+  setScope(copy);
+  refreshStats();
+  pushHistory();
+  toast(`Duplicated as <b>${escapeHTML(copy.name)}</b> — it’s selected, drag the gizmo to place it.`, 'success', 3500);
+}
+
+function toggleVisibility(mesh) {
+  if (!mesh) { const rec = requirePart('hide'); if (!rec) return; mesh = rec.mesh; }
+  mesh.visible = !mesh.visible;
+  buildOutliner();
+  updatePartButtons();
+  updateSelBox();
+  pushHistory();
+  toast(`${mesh.visible ? 'Showing' : 'Hid'} <b>${escapeHTML(mesh.name)}</b>${mesh.visible ? '' : ' — hidden parts are left out of exports. Click the eye in the Outliner to show it again.'}`, 'info', 3200);
+}
+
+function renamePart(mesh) {
+  const name = window.prompt('Rename part:', mesh.name);
+  if (name == null) return;
+  const clean = name.trim().slice(0, 80);
+  if (!clean || clean === mesh.name) return;
+  mesh.name = uniquePartName(clean);
+  setScope(state.scope);
+  pushHistory();
+}
+
+/* Split a geometry by material group and by connected (touching) pieces.
+   Returns [{ geometry, materialIndex }] — or null if it is already a single piece. */
+const MAX_SPLIT_PARTS = 200;
+function splitGeometry(src) {
+  const pos = src.getAttribute('position');
+  const vc = pos.count;
+  const idx = src.index ? src.index.array : null;
+  const n = idx ? idx.length : vc;
+  const vAt = idx ? (i) => idx[i] : (i) => i;
+
+  // weld vertices by (quantized) position so UV / normal seams don't split a piece
+  const tol = tolOf(src) * 10;
+  const keyIds = new Int32Array(vc);
+  const keyMap = new Map();
+  for (let i = 0; i < vc; i++) {
+    const k = Math.round(pos.getX(i) / tol) + '_' + Math.round(pos.getY(i) / tol) + '_' + Math.round(pos.getZ(i) / tol);
+    let id = keyMap.get(k);
+    if (id === undefined) { id = keyMap.size; keyMap.set(k, id); }
+    keyIds[i] = id;
+  }
+  const parent = new Int32Array(keyMap.size);
+  for (let i = 0; i < parent.length; i++) parent[i] = i;
+  const find = (x) => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+  for (let t = 0; t + 2 < n; t += 3) {
+    const a = find(keyIds[vAt(t)]), b = find(keyIds[vAt(t + 1)]), c = find(keyIds[vAt(t + 2)]);
+    if (a !== b) parent[b] = a;
+    const a2 = find(a);
+    if (a2 !== find(c)) parent[find(c)] = a2;
+  }
+
+  const groups = src.groups && src.groups.length ? src.groups : [{ start: 0, count: n, materialIndex: 0 }];
+  let buckets = []; // {materialIndex, tris: []}
+  for (const grp of groups) {
+    const byRoot = new Map();
+    const end = Math.min(grp.start + grp.count, n);
+    for (let t = grp.start; t + 2 < end; t += 3) {
+      const r = find(keyIds[vAt(t)]);
+      let b = byRoot.get(r);
+      if (!b) { b = { materialIndex: grp.materialIndex || 0, tris: [] }; byRoot.set(r, b); }
+      b.tris.push(t);
+    }
+    buckets.push(...byRoot.values());
+  }
+  if (buckets.length <= 1) return null;
+  buckets.sort((a, b) => b.tris.length - a.tris.length);
+  if (buckets.length > MAX_SPLIT_PARTS) {
+    // keep the biggest pieces separate; lump the tiny leftovers together per material
+    const rest = buckets.slice(MAX_SPLIT_PARTS - 1);
+    buckets = buckets.slice(0, MAX_SPLIT_PARTS - 1);
+    const lump = new Map();
+    for (const b of rest) {
+      let l = lump.get(b.materialIndex);
+      if (!l) { l = { materialIndex: b.materialIndex, tris: [], lumped: true }; lump.set(b.materialIndex, l); }
+      l.tris.push(...b.tris);
+    }
+    buckets.push(...lump.values());
+  }
+
+  const attrNames = Object.keys(src.attributes);
+  const remap = new Int32Array(vc).fill(-1);
+  return buckets.map((b) => {
+    const used = [];
+    const outIdx = new Uint32Array(b.tris.length * 3);
+    let w = 0;
+    for (const t of b.tris) {
+      for (let k = 0; k < 3; k++) {
+        const v = vAt(t + k);
+        if (remap[v] < 0) { remap[v] = used.length; used.push(v); }
+        outIdx[w++] = remap[v];
+      }
+    }
+    const geo = new THREE.BufferGeometry();
+    for (const name of attrNames) {
+      const attr = src.attributes[name];
+      const item = attr.itemSize;
+      const out = new Float32Array(used.length * item);
+      for (let i = 0; i < used.length; i++) {
+        const v = used[i];
+        out[i * item] = attr.getX(v);
+        if (item > 1) out[i * item + 1] = attr.getY(v);
+        if (item > 2) out[i * item + 2] = attr.getZ(v);
+        if (item > 3) out[i * item + 3] = attr.getW(v);
+      }
+      geo.setAttribute(name, new THREE.BufferAttribute(out, item));
+    }
+    geo.setIndex(new THREE.BufferAttribute(outIdx, 1));
+    for (const v of used) remap[v] = -1;
+    return { geometry: geo, materialIndex: b.materialIndex, lumped: !!b.lumped };
+  });
+}
+
+function opSplit() {
+  if (!state.modelRoot) return toast('Load a model first.', 'warn');
+  const recs = scopeRecs().filter((r) => r.editable && !r.isPoints);
+  if (!recs.length) return toast('Nothing to split here (skinned / point geometry can’t be split).', 'warn');
+  setLoading(true, 'Splitting into parts…');
+  setTimeout(() => {
+    try {
+      let created = 0, splitCount = 0, lumped = false;
+      for (const rec of recs) {
+        const parts = splitGeometry(rec.mesh.geometry);
+        if (!parts) continue;
+        const src = rec.mesh;
+        const parent = src.parent;
+        const mats = Array.isArray(rec.baseMaterial) ? rec.baseMaterial : [rec.baseMaterial];
+        const newRecs = parts.map((part, i) => {
+          const mat = cloneMaterial(mats[part.materialIndex] || mats[0]);
+          const m = new THREE.Mesh(part.geometry, mat);
+          const matName = mat && mat.name ? mat.name : '';
+          m.name = uniquePartName(`${src.name}_${part.lumped ? 'small_bits' : (matName && parts.length < 30 ? matName : 'part' + (i + 1))}`);
+          m.position.copy(src.position); m.quaternion.copy(src.quaternion); m.scale.copy(src.scale);
+          m.visible = src.visible;
+          centerGeometryPivot(m);
+          rememberOrigTransform(m);
+          parent.add(m);
+          if (part.lumped) lumped = true;
+          return { mesh: m, baseMaterial: mat, baseline: part.geometry, pct: 100, editable: true, isPoints: false };
+        });
+        parent.remove(src);
+        const at = state.meshes.indexOf(rec);
+        state.meshes.splice(at, 1, ...newRecs);
+        created += newRecs.length;
+        splitCount++;
+      }
+      if (!splitCount) {
+        toast(`${state.scope ? '<b>' + escapeHTML(scopeName()) + '</b> is' : 'Every mesh is'} already a single connected piece with one material — nothing to split.`, 'info', 5000);
+        return;
+      }
+      setViewMode(state.viewMode);
+      setScope(null);
+      refreshStats();
+      pushHistory();
+      toast(`Split into <b>${created}</b> separate parts${lumped ? ` (tiny fragments grouped as “small_bits”)` : ''}. Click any part to select it, then move, recolor, hide or delete it. Ctrl+Z to undo.`, 'success', 7000);
+    } catch (e) {
+      console.error('[Aether3D] split failed:', e);
+      toast('Split failed: ' + escapeHTML(e.message || String(e)), 'error');
+    } finally {
+      setLoading(false);
+    }
+  }, 30);
+}
+
+/* ------------------------------------------------------------------ */
 /* Undo / redo                                                         */
 /* ------------------------------------------------------------------ */
 
@@ -1249,10 +1700,18 @@ function historySnapshot() {
     scope: state.scope,
     recs: state.meshes.map((r) => ({
       mesh: r.mesh,
-      material: Array.isArray(r.baseMaterial) ? r.baseMaterial.map((m) => m && m.clone ? m.clone() : m) : (r.baseMaterial && r.baseMaterial.clone ? r.baseMaterial.clone() : r.baseMaterial),
+      parent: r.mesh.parent,
+      name: r.mesh.name,
+      visible: r.mesh.visible,
+      mpos: r.mesh.position.clone(),
+      mquat: r.mesh.quaternion.clone(),
+      mscale: r.mesh.scale.clone(),
+      material: cloneMaterial(r.baseMaterial),
       geometry: r.mesh.geometry,
       baseline: r.baseline,
       pct: r.pct,
+      editable: r.editable,
+      isPoints: r.isPoints,
     })),
   };
 }
@@ -1271,22 +1730,25 @@ function applySnapshot(s) {
   state.modelRoot.position.copy(s.pos);
   state.modelRoot.quaternion.copy(s.quat);
   state.modelRoot.scale.copy(s.scale);
-  for (const r of s.recs) {
-    const rec = state.meshes.find((x) => x.mesh === r.mesh);
-    if (!rec) continue;
-    rec.baseMaterial = r.material;
-    rec.baseline = r.baseline;
-    rec.pct = r.pct;
-    rec.mesh.geometry = r.geometry;
+  // Detach parts that don't exist in this snapshot (e.g. undoing a duplicate / split)
+  const keep = new Set(s.recs.map((r) => r.mesh));
+  for (const rec of state.meshes) {
+    if (!keep.has(rec.mesh) && rec.mesh.parent) rec.mesh.parent.remove(rec.mesh);
   }
+  state.meshes = s.recs.map((r) => {
+    if (r.parent && r.mesh.parent !== r.parent) r.parent.add(r.mesh); // re-attach deleted parts
+    r.mesh.name = r.name;
+    r.mesh.visible = r.visible;
+    r.mesh.position.copy(r.mpos);
+    r.mesh.quaternion.copy(r.mquat);
+    r.mesh.scale.copy(r.mscale);
+    r.mesh.geometry = r.geometry;
+    // clone again so later edits never mutate the stored snapshot
+    return { mesh: r.mesh, baseMaterial: cloneMaterial(r.material), baseline: r.baseline, pct: r.pct, editable: r.editable, isPoints: r.isPoints };
+  });
   state.scope = s.scope && state.meshes.some((x) => x.mesh === s.scope) ? s.scope : null;
   setViewMode(state.viewMode);
-  syncTransformInputs();
-  syncMaterialSliders();
-  syncPolySliderUI();
-  refreshStats();
-  buildOutliner();
-  updateSelBox();
+  setScope(state.scope);
 }
 
 function undo() {
@@ -1401,6 +1863,9 @@ async function doExport() {
   btn.disabled = true;
   label.textContent = 'Baking geometry…';
   await new Promise((r) => setTimeout(r, 40));
+  // Hidden parts are left out of the export
+  const hidden = state.meshes.filter((r) => !r.mesh.visible && r.mesh.parent).map((r) => [r.mesh, r.mesh.parent]);
+  hidden.forEach(([m, p]) => p.remove(m));
   try {
     let blob, name;
     if (fmt === 'obj') {
@@ -1428,6 +1893,7 @@ async function doExport() {
     console.error('[Aether3D] export failed:', err);
     toast(`Export failed: ${escapeHTML((err && err.message) || String(err))}`, 'error', 7000);
   } finally {
+    hidden.forEach(([m, p]) => p.add(m));
     btn.disabled = false;
     setTimeout(() => { label.textContent = `Download Model (${state.exportFormat.toUpperCase()})`; }, 1200);
   }
@@ -1659,20 +2125,32 @@ $('btn-subdivide').addEventListener('click', opSubdivide);
 $('btn-decimate').addEventListener('click', opDecimate);
 $('btn-mirror').addEventListener('click', opMirror);
 $('btn-normals').addEventListener('click', opSmoothNormals);
+$('btn-split').addEventListener('click', opSplit);
+$('btn-duplicate').addEventListener('click', opDuplicate);
+$('btn-hide').addEventListener('click', () => toggleVisibility());
+$('btn-delete').addEventListener('click', opDelete);
+
+// Bottom toolbar: mouse wheel scrolls it sideways when it overflows
+const barScroll = $('transform-bar-scroll');
+barScroll.addEventListener('wheel', (e) => {
+  if (barScroll.scrollWidth <= barScroll.clientWidth) return;
+  if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) { barScroll.scrollLeft += e.deltaY; e.preventDefault(); }
+}, { passive: false });
 
 // Transform inputs
-[$('pos-x'), $('pos-y'), $('pos-z'), $('rot-x'), $('rot-y'), $('rot-z')].forEach((inp) => {
+[$('pos-x'), $('pos-y'), $('pos-z'), $('rot-x'), $('rot-y'), $('rot-z'), $('scl-x'), $('scl-y'), $('scl-z')].forEach((inp) => {
   inp.addEventListener('change', commitTransformFromInputs);
   // Enter just blurs — the native 'change' fired by blur does ONE commit (no duplicate history entry)
   inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') inp.blur(); });
 });
 $('btn-transform-reset').addEventListener('click', () => {
   if (!state.modelRoot) return toast('Load a model first.', 'warn');
-  state.modelRoot.position.set(0, 0, 0);
-  state.modelRoot.rotation.set(0, 0, 0);
-  state.modelRoot.scale.set(1, 1, 1);
+  const t = transformTarget();
+  const o = origTransforms.get(t);
+  if (o) { t.position.copy(o.pos); t.quaternion.copy(o.quat); t.scale.copy(o.scale); }
+  else { t.position.set(0, 0, 0); t.rotation.set(0, 0, 0); t.scale.set(1, 1, 1); }
   syncTransformInputs(); updateSelBox(); pushHistory();
-  toast('Transform reset to identity.', 'success', 2200);
+  toast(t === state.modelRoot ? 'Model transform reset.' : `<b>${escapeHTML(t.name)}</b> moved back to where it started.`, 'success', 2200);
 });
 $('btn-center-pivot').addEventListener('click', centerPivot);
 $('btn-ground').addEventListener('click', groundToFloor);
@@ -1681,7 +2159,8 @@ $('btn-ground').addEventListener('click', groundToFloor);
 $('scale-slider').addEventListener('input', (e) => {
   const v = e.target.value / 100;
   $('scale-display').textContent = v.toFixed(2) + 'x';
-  if (state.modelRoot) state.modelRoot.scale.setScalar(v);
+  const t = transformTarget();
+  if (t) { t.scale.setScalar(v); syncTransformInputs(); updateSelBox(); }
 });
 $('scale-slider').addEventListener('change', () => { if (state.modelRoot) pushHistory(); });
 
@@ -1715,6 +2194,30 @@ function bindMatSlider(sliderId, valId, key) {
 bindMatSlider('slider-rough', 'val-rough', 'roughness');
 bindMatSlider('slider-metal', 'val-metal', 'metalness');
 bindMatSlider('slider-emis', 'val-emis', 'emission');
+
+// Color / opacity / texture
+$('mat-color').addEventListener('input', (e) => applyColor(e.target.value));
+$('mat-color').addEventListener('change', () => { if (state.modelRoot) pushHistory(); });
+$('mat-color-hex').addEventListener('change', (e) => {
+  let v = e.target.value.trim();
+  if (!v.startsWith('#')) v = '#' + v;
+  if (/^#[0-9a-f]{3}$/i.test(v)) v = '#' + v.slice(1).split('').map((c) => c + c).join('');
+  if (!/^#[0-9a-f]{6}$/i.test(v)) { toast('Enter a color like <b>#ff8800</b>.', 'warn', 2500); syncMaterialSliders(); return; }
+  applyColor(v.toLowerCase());
+  if (state.modelRoot) pushHistory();
+});
+$('mat-color-hex').addEventListener('keydown', (e) => { if (e.key === 'Enter') e.target.blur(); });
+document.querySelectorAll('.mat-swatch').forEach((b) => b.addEventListener('click', () => {
+  applyColor(b.dataset.color);
+  if (state.modelRoot) pushHistory();
+}));
+$('slider-opacity').addEventListener('input', (e) => {
+  const v = e.target.value / 100;
+  $('val-opacity').textContent = v.toFixed(2);
+  applyOpacity(v);
+});
+$('slider-opacity').addEventListener('change', () => { if (state.modelRoot) pushHistory(); });
+$('btn-remove-texture').addEventListener('click', removeTextures);
 
 // Material presets
 document.querySelectorAll('.mat-preset-btn').forEach((b) => b.addEventListener('click', () => applyPreset(b.dataset.preset)));
@@ -1754,11 +2257,54 @@ $('btn-toggle-grid').addEventListener('click', () => {
   grid.visible = !grid.visible;
   toast(`Grid ${grid.visible ? 'shown' : 'hidden'}.`, 'info', 1800);
 });
-$('btn-simple-edit').addEventListener('click', () => {
-  const dock = $('right-dock');
-  dock.classList.toggle('hidden');
-  setTimeout(resize, 60);
+/* Collapsible panels & sections (remembered between visits) */
+const UI_KEY = 'aether3d.ui.v1';
+const ui = (() => {
+  try { return Object.assign({ left: true, right: true, tray: true, sections: {} }, JSON.parse(localStorage.getItem(UI_KEY) || '{}')); }
+  catch (e) { return { left: true, right: true, tray: true, sections: {} }; }
+})();
+function saveUI() { try { localStorage.setItem(UI_KEY, JSON.stringify(ui)); } catch (e) {} }
+
+function applyPanels() {
+  document.body.classList.toggle('left-collapsed', !ui.left);
+  document.body.classList.toggle('right-collapsed', !ui.right);
+  document.body.classList.toggle('tray-closed', !ui.tray);
+  document.querySelectorAll('.panel-toggle-btn').forEach((b) => {
+    const on = !!ui[b.dataset.panel];
+    b.classList.toggle('text-secondary', on);
+    b.classList.toggle('bg-surface-container-high', on);
+    b.classList.toggle('text-on-surface-variant', !on);
+  });
+  const ins = $('btn-simple-edit');
+  ins.classList.toggle('text-secondary', ui.right);
+  setTimeout(resize, 30);
+}
+function setPanel(name, open) { ui[name] = open; saveUI(); applyPanels(); }
+
+function setSection(id, collapsed) {
+  ui.sections[id] = collapsed;
+  document.querySelectorAll(`.panel-head[data-section="${id}"]`).forEach((h) => h.classList.toggle('collapsed', collapsed));
+  document.querySelectorAll(`[data-section-body="${id}"]`).forEach((b) => b.classList.toggle('collapsed', collapsed));
+}
+document.querySelectorAll('.panel-head').forEach((h) => {
+  const id = h.dataset.section;
+  h.title = h.title || 'Click to collapse / expand this section';
+  setSection(id, !!ui.sections[id]);
+  h.addEventListener('click', () => { setSection(id, !ui.sections[id]); saveUI(); });
 });
+$('btn-collapse-all-sections').addEventListener('click', () => {
+  const ids = [...document.querySelectorAll('#right-dock .panel-head')].map((h) => h.dataset.section);
+  const collapse = ids.some((id) => !ui.sections[id]);
+  ids.forEach((id) => setSection(id, collapse));
+  $('btn-collapse-all-sections').textContent = collapse ? 'Expand all' : 'Collapse all';
+  saveUI();
+});
+document.querySelectorAll('.panel-toggle-btn').forEach((b) => b.addEventListener('click', () => setPanel(b.dataset.panel, !ui[b.dataset.panel])));
+$('btn-collapse-left').addEventListener('click', () => setPanel('left', false));
+$('btn-collapse-right').addEventListener('click', () => setPanel('right', false));
+$('btn-close-tray').addEventListener('click', (e) => { e.stopPropagation(); setPanel('tray', false); });
+$('btn-simple-edit').addEventListener('click', () => setPanel('right', !ui.right));
+applyPanels();
 $('btn-quick-preview').addEventListener('click', () => setPreview(true));
 $('btn-exit-preview').addEventListener('click', () => setPreview(false));
 function setPreview(on) {
@@ -1775,6 +2321,8 @@ window.addEventListener('keydown', (e) => {
     if (e.shiftKey) redo(); else undo();
     return;
   }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); return; }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'd') { e.preventDefault(); opDuplicate(); return; }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   switch (e.key.toLowerCase()) {
     case 'v': setTool('select'); break;
@@ -1782,8 +2330,12 @@ window.addEventListener('keydown', (e) => {
     case 'r': setTool('rotate'); break;
     case 's': setTool('scale'); break;
     case 'f': frameCamera(false); break;
+    case 'h': toggleVisibility(); break;
+    case 'delete':
+    case 'backspace': e.preventDefault(); opDelete(); break;
     case 'escape':
       if (document.body.classList.contains('preview-mode')) setPreview(false);
+      else if (state.scope) setScope(null);
       else setTool('select');
       break;
   }
@@ -1806,6 +2358,7 @@ refreshStats();
 syncMaterialSliders();
 syncPolySliderUI();
 updatePresetChips();
+updatePartButtons();
 
 console.info('%cAether3D Studio ready — three.js r170, 100% client-side.', 'color:#4cd7f6;font-weight:bold;');
 
