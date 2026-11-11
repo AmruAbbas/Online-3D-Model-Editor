@@ -22,6 +22,8 @@ import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
+import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
+import { unzipSync, zipSync, strToU8, strFromU8 } from 'three/addons/libs/fflate.module.js';
 
 /* ------------------------------------------------------------------ */
 /* Constants & tiny helpers                                            */
@@ -44,7 +46,7 @@ const baseNameOf = (name) => name.replace(/\.[^.]+$/, '');
 const state = {
   modelRoot: null,     // Group that holds the loaded model
   meshes: [],          // [{mesh, baseMaterial, baseline, pct, editable, isPoints}]
-  scope: null,         // null = whole model, else a mesh
+  scope: null,         // null = whole scene, else a top-level object or a part (mesh)
   viewMode: 'pbr',
   tool: 'move',
   camType: 'persp',
@@ -440,9 +442,138 @@ async function parseModel(file, map) {
   throw new Error('Unsupported format: .' + ext);
 }
 
+/* ---------- Checking files before anything is loaded ----------
+   A model file must really be what its extension says (checked from its bytes), and a .zip is
+   only accepted if it contains such a model. Nothing in the scene changes when a check fails. */
+
+const ZIP_LIMITS = { maxEntries: 5000, maxTotalBytes: 1024 * 1048576, maxRatio: 1000 };
+const ZIP_KEEP_EXT = new Set([...SUPPORTED_EXT, 'mtl', 'bin', 'png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif', 'tga', 'ktx2', 'dds']);
+
+async function readHead(file, n = 4 * 1048576) {
+  return new Uint8Array(await file.slice(0, n).arrayBuffer());
+}
+const ascii = (u8, a = 0, b = u8.length) => { let s = ''; for (let i = a; i < Math.min(b, u8.length); i++) s += String.fromCharCode(u8[i]); return s; };
+
+// Returns null if the file looks like a valid model of its type, otherwise a short reason
+async function checkModelFile(file) {
+  const ext = extOf(file.name);
+  if (file.size === 0) return 'the file is empty';
+  const head = await readHead(file);
+  const txt = () => strFromU8(head.subarray(0, Math.min(head.length, 4 * 1048576)), true);
+  switch (ext) {
+    case 'glb': return ascii(head, 0, 4) === 'glTF' ? null : 'it doesn’t start with the GLB “glTF” signature';
+    case 'gltf': {
+      if (file.size > 300 * 1048576) return null; // too big to pre-parse; the loader will check it
+      try { const j = JSON.parse(await file.text()); return j && j.asset ? null : 'it’s JSON but has no glTF “asset” block'; }
+      catch (e) { return 'it isn’t valid glTF JSON'; }
+    }
+    case 'obj': return /^\s*v\s+[-+.\d]/m.test(txt()) ? null : 'no vertex (“v x y z”) lines were found';
+    case 'stl': {
+      if (head.length >= 84) {
+        const n = new DataView(head.buffer, head.byteOffset, head.byteLength).getUint32(80, true);
+        if (n > 0 && 84 + n * 50 <= file.size && file.size - (84 + n * 50) < 4096) return null; // binary STL
+      }
+      const t = txt();
+      return /^\s*solid/i.test(t) && /facet\s+normal/i.test(t) ? null : 'it’s neither a binary STL nor an ASCII STL with facets';
+    }
+    case 'ply': return /^ply\r?\n/.test(ascii(head, 0, 5)) ? null : 'it doesn’t start with the “ply” header';
+    case 'fbx': {
+      if (ascii(head, 0, 18) === 'Kaydara FBX Binary') return null;
+      return /FBXHeaderExtension|;\s*FBX\s+\d/.test(txt()) ? null : 'it isn’t a binary or ASCII FBX file';
+    }
+    case 'dae': return /<COLLADA[\s>]/.test(txt()) ? null : 'no <COLLADA> element was found';
+    case '3mf': return ascii(head, 0, 4) === 'PK\x03\x04' ? null : '3MF files are zip-based, but this one isn’t';
+  }
+  return 'unsupported type';
+}
+
+// Unpack a .zip into File objects — or throw an Error explaining why it was rejected
+function expandZip(zipFile, bytes) {
+  let entries = 0, total = 0;
+  const ignored = [];
+  let out;
+  try {
+    out = unzipSync(bytes, {
+      filter: (f) => {
+        entries++;
+        if (entries > ZIP_LIMITS.maxEntries) throw new Error(`it has more than ${ZIP_LIMITS.maxEntries} entries`);
+        const name = f.name;
+        const base = name.split('/').pop();
+        if (!base || name.endsWith('/') || name.startsWith('__MACOSX/') || base.startsWith('.')) return false;
+        if (!ZIP_KEEP_EXT.has(extOf(base))) { ignored.push(base); return false; }
+        total += f.originalSize;
+        if (total > ZIP_LIMITS.maxTotalBytes) throw new Error('it would unpack to more than 1 GB');
+        if (f.size > 0 && f.originalSize / f.size > ZIP_LIMITS.maxRatio) throw new Error(`“${base}” is suspiciously over-compressed (possible zip bomb)`);
+        return true;
+      },
+    });
+  } catch (e) {
+    const msg = String((e && e.message) || e);
+    if (/^it |^“/.test(msg)) throw new Error(msg);
+    throw new Error('it couldn’t be read — it may be damaged, password-protected, or not really a zip');
+  }
+  const files = Object.entries(out).map(([name, data]) => new File([data], name.split('/').pop()));
+  return { files, ignored };
+}
+
 async function handleFiles(fileList) {
-  const files = [...fileList].filter(Boolean);
+  let files = [...fileList].filter(Boolean);
   if (!files.length) return;
+
+  // ---- 1) unpack and vet any .zip files ----
+  const zips = files.filter((f) => extOf(f.name) === 'zip');
+  if (zips.length) {
+    if (zips.length > 1) return toast('Please drop one .zip at a time.', 'warn', 5000);
+    const zip = zips[0];
+    let unpacked;
+    try {
+      const bytes = new Uint8Array(await zip.arrayBuffer());
+      if (ascii(bytes, 0, 2) !== 'PK') throw new Error('it isn’t a zip file (wrong signature)');
+      unpacked = expandZip(zip, bytes);
+    } catch (e) {
+      return toast(`Rejected <b>${escapeHTML(zip.name)}</b>: ${escapeHTML(e.message)}. Nothing was loaded.`, 'error', 9000);
+    }
+    const models = unpacked.files.filter((f) => SUPPORTED_EXT.includes(extOf(f.name)));
+    if (!models.length) {
+      const seen = unpacked.files.map((f) => f.name).concat(unpacked.ignored);
+      return toast(`Rejected <b>${escapeHTML(zip.name)}</b>: it contains no 3D model. A zip must include one of ${SUPPORTED_EXT.map((e) => '.' + e).join(', ')}${seen.length ? ` (found: ${escapeHTML(seen.slice(0, 8).join(', '))}${seen.length > 8 ? '…' : ''})` : ' (it’s empty)'}. Nothing was loaded.`, 'error', 11000);
+    }
+    if (unpacked.ignored.length) {
+      toast(`Ignored ${unpacked.ignored.length} unrelated file${unpacked.ignored.length > 1 ? 's' : ''} in the zip (${escapeHTML(unpacked.ignored.slice(0, 5).join(', '))}${unpacked.ignored.length > 5 ? '…' : ''}).`, 'info', 6000);
+    }
+    files = files.filter((f) => f !== zip).concat(unpacked.files);
+    files.zipSource = zip;
+  }
+
+  // ---- 2) pick the model and verify its contents match its extension ----
+  const candidates = [];
+  for (const p of LOAD_PRIORITY) files.filter((f) => extOf(f.name) === p).forEach((f) => candidates.push(f));
+  const problems = [];
+  let verified = null;
+  for (const f of candidates) {
+    const why = await checkModelFile(f);
+    if (!why) { verified = f; break; }
+    problems.push(`<b>${escapeHTML(f.name)}</b> — ${why}`);
+  }
+  if (candidates.length && !verified) {
+    const src = files.zipSource ? `<b>${escapeHTML(files.zipSource.name)}</b> was rejected: ` : '';
+    return toast(`${src}No valid 3D model found. ${problems.join('; ')}. Nothing was loaded.`, 'error', 11000);
+  }
+  if (verified && candidates[0] !== verified) {
+    toast(`Skipped invalid file${problems.length > 1 ? 's' : ''}: ${problems.join('; ')}.`, 'warn', 8000);
+  }
+  // glTF that points at separate .bin buffers can't work without them
+  if (verified && extOf(verified.name) === 'gltf' && verified.size <= 300 * 1048576) {
+    try {
+      const j = JSON.parse(await verified.text());
+      const names = new Set(files.map((f) => f.name.toLowerCase()));
+      const missing = (j.buffers || []).map((b) => b.uri).filter((u) => u && !/^data:/i.test(u))
+        .map((u) => decodeURIComponent(u.split(/[\\/]/).pop())).filter((u) => !names.has(u.toLowerCase()));
+      if (missing.length) {
+        return toast(`${files.zipSource ? `<b>${escapeHTML(files.zipSource.name)}</b> was rejected: ` : ''}<b>${escapeHTML(verified.name)}</b> needs ${escapeHTML(missing.join(', '))}, which ${missing.length > 1 ? 'are' : 'is'} missing. Drop ${missing.length > 1 ? 'them' : 'it'} together with the .gltf (or zip them up together). Nothing was loaded.`, 'error', 11000);
+      }
+    } catch (e) { /* checked above */ }
+  }
 
   const map = new Map();
   const freshURLs = [];
@@ -453,11 +584,7 @@ async function handleFiles(fileList) {
     freshURLs.push(url);
   }
 
-  let primary = null;
-  for (const p of LOAD_PRIORITY) {
-    primary = files.find((f) => extOf(f.name) === p);
-    if (primary) break;
-  }
+  const primary = verified;
 
   if (!primary) {
     const blend = files.find((f) => extOf(f.name) === 'blend');
@@ -471,9 +598,18 @@ async function handleFiles(fileList) {
     return;
   }
 
-  state.originalFile = primary;
-  state.baseName = baseNameOf(primary.name);
+  state.originalFile = files.zipSource || primary;
   updateDownloadOriginal();
+  // OBJ: warn (don't block) when its material file or textures weren't included
+  if (extOf(primary.name) === 'obj') {
+    try {
+      const head = strFromU8(await readHead(primary, 1048576), true);
+      const names = new Set(files.map((f) => f.name.toLowerCase()));
+      const libs = [...head.matchAll(/^\s*mtllib\s+(.+)$/gm)].map((m) => m[1].trim().split(/[\\/]/).pop());
+      const missingLibs = libs.filter((l) => !names.has(l.toLowerCase()));
+      if (missingLibs.length) toast(`<b>${escapeHTML(primary.name)}</b> refers to <b>${escapeHTML(missingLibs.join(', '))}</b> (its colors/materials), which wasn’t included — it will load in plain grey. Drop the .mtl (and textures) together with the .obj to keep them.`, 'warn', 9000);
+    } catch (e) {}
+  }
   // A .blend dropped next to a loadable model is silently useless — say so instead of ignoring it
   const strayBlend = files.find((f) => extOf(f.name) === 'blend');
   if (strayBlend) {
@@ -484,10 +620,10 @@ async function handleFiles(fileList) {
 
   try {
     const obj = await parseModel(primary, map);
-    setModel(obj, extOf(primary.name).toUpperCase()); // clearModel inside revokes previous session's blob URLs
-    sessionBlobURLs.push(...freshURLs);               // the new model now owns these
-    const s = modelStats();
-    toast(`Loaded <b>${escapeHTML(primary.name)}</b> — ${fmtInt(s.tris)} triangles, ${state.meshes.length} mesh${state.meshes.length !== 1 ? 'es' : ''}. Processed 100% locally; nothing was uploaded.`, 'success', 5000);
+    const { wasEmpty, recs } = addToScene(obj, extOf(primary.name).toUpperCase(), { name: baseNameOf(primary.name), frame: 'always' });
+    sessionBlobURLs.push(...freshURLs);               // the scene now owns these
+    const tris = recs.reduce((a, r) => a + meshTris(r), 0);
+    toast(`${wasEmpty ? 'Loaded' : 'Added'} <b>${escapeHTML(primary.name)}</b> — ${fmtInt(tris)} triangles, ${recs.length} part${recs.length !== 1 ? 's' : ''}.${wasEmpty ? '' : ' It was placed beside what’s already in the scene; use <b>New Scene</b> to start over.'} Processed 100% locally; nothing was uploaded.`, 'success', 6000);
   } catch (err) {
     console.error('[Online3D] Load failed:', err);
     for (const u of freshURLs) { try { URL.revokeObjectURL(u); } catch (e) {} }
@@ -567,44 +703,71 @@ function recOf(mesh) { return state.meshes.find((r) => r.mesh === mesh) || null;
 // The object the gizmo & transform inputs act on: the selected part, or the whole model
 function transformTarget() {
   if (!state.modelRoot) return null;
-  const rec = state.scope ? recOf(state.scope) : null;
-  if (rec && !rec.mesh.isSkinnedMesh) return rec.mesh;
-  return state.modelRoot;
+  if (!state.scope) return state.modelRoot;
+  // moving a skinned (animated) mesh by itself does nothing — its skeleton drives it — so move its object
+  if (state.scope.isSkinnedMesh) return topObjectOf(state.scope) || state.modelRoot;
+  return state.scope;
 }
 
-function setModel(object, format) {
-  clearModel(false);
+// Is `node` the same as, or somewhere inside, `ancestor`?
+function isInside(node, ancestor) {
+  for (let o = node; o; o = o.parent) if (o === ancestor) return true;
+  return false;
+}
+// The top-level object (direct child of the scene root) that contains `node`
+function topObjectOf(node) {
+  let o = node;
+  while (o && o.parent && o.parent !== state.modelRoot) o = o.parent;
+  return o && o.parent === state.modelRoot ? o : null;
+}
+function objectRecs(obj) { return state.meshes.filter((r) => isInside(r.mesh, obj)); }
+function sceneNames() {
+  const names = new Set(state.meshes.map((r) => r.mesh.name));
+  if (state.modelRoot) state.modelRoot.children.forEach((c) => names.add(c.name));
+  return names;
+}
+function uniqueName(base, taken = sceneNames()) {
+  base = String(base || 'object').trim().slice(0, 80) || 'object';
+  if (!taken.has(base)) return base;
+  let k = 2;
+  while (taken.has(`${base}_${k}`)) k++;
+  return `${base}_${k}`;
+}
 
-  // Imported lights/cameras would fight our rig — strip them
+// Move a group's origin to the center of its contents, without moving anything visually
+function centerObjectPivot(obj) {
+  if (obj.isMesh || obj.isPoints) return;
+  obj.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(obj);
+  if (box.isEmpty()) return;
+  const cl = obj.worldToLocal(box.getCenter(new THREE.Vector3()));
+  if (cl.lengthSq() < 1e-14) return;
+  for (const ch of obj.children) ch.position.sub(cl);
+  obj.position.add(cl.multiply(obj.scale).applyQuaternion(obj.quaternion));
+  obj.updateMatrixWorld(true);
+}
+
+// Prepare freshly-loaded content: strip lights/cameras, unique names, PBR materials, centered pivots.
+function prepareObject(object, taken) {
   const strip = [];
   object.traverse((o) => { if (o.isLight || o.isCamera) strip.push(o); });
   strip.forEach((o) => o.parent && o.parent.remove(o));
 
-  const root = new THREE.Group();
-  root.name = state.baseName || 'model';
-  root.add(object);
-  scene.add(root);
-  rememberOrigTransform(root);
-  state.modelRoot = root;
-  state.format = format;
-  state.scope = null;
-  state.activePreset = null;
-
-  let idx = 0;
   const found = [];
   object.traverse((o) => {
     if ((o.isMesh || o.isPoints) && o.geometry && o.geometry.getAttribute('position')) found.push(o);
   });
   const matCache = new Map();
   const centeredGeos = new Set();
-  const usedNames = new Set();
+  const recs = [];
+  let idx = 0;
   for (const o of found) {
     const isPoints = !!o.isPoints;
     if (!isPoints && !o.geometry.getAttribute('normal')) o.geometry.computeVertexNormals();
-    let nm = o.name || (isPoints ? 'points_' : 'mesh_') + (++idx);
-    if (usedNames.has(nm)) { let k = 2; while (usedNames.has(`${nm}_${k}`)) k++; nm = `${nm}_${k}`; }
-    usedNames.add(nm);
-    o.name = nm;
+    if (o !== object) { // the object itself was already named by addToScene
+      o.name = uniqueName(o.name || (isPoints ? 'points_' : 'mesh_') + (++idx), taken);
+      taken.add(o.name);
+    }
     const editable = !isPoints && !o.isSkinnedMesh &&
       !o.geometry.getAttribute('skinIndex') &&
       !(o.morphTargetInfluences && o.morphTargetInfluences.length);
@@ -616,32 +779,103 @@ function setModel(object, format) {
       centerGeometryPivot(o);
       centeredGeos.add(o.geometry);
     }
-    rememberOrigTransform(o);
-    state.meshes.push({ mesh: o, baseMaterial: o.material, baseline: o.geometry, pct: 100, editable, isPoints });
+    recs.push({ mesh: o, baseMaterial: o.material, baseline: o.geometry, pct: 100, editable, isPoints });
   }
+  return recs;
+}
 
-  if (!state.meshes.length) {
-    clearModel();
-    throw new Error('No renderable geometry found in this file.');
+function ensureRoot() {
+  if (state.modelRoot) return;
+  clearModel(false);
+  const root = new THREE.Group();
+  root.name = 'Scene';
+  scene.add(root);
+  rememberOrigTransform(root);
+  state.modelRoot = root;
+  state.scope = null;
+  state.activePreset = null;
+}
+
+/* Add loaded content or a shape to the scene. The first thing added starts a new scene;
+   later additions are placed beside what's already there. */
+function addToScene(object, format, opts = {}) {
+  const wasEmpty = !state.modelRoot;
+  const taken = wasEmpty ? new Set() : sceneNames();
+  object.name = uniqueName(opts.name || object.name || 'object', taken);
+  taken.add(object.name);
+  const recs = prepareObject(object, taken);
+  if (!recs.length) throw new Error('No renderable geometry found in this file.');
+  centerObjectPivot(object);
+
+  const sceneBox = wasEmpty ? null : new THREE.Box3().setFromObject(state.modelRoot);
+  ensureRoot();
+  if (wasEmpty) {
+    state.baseName = opts.name || object.name;
+    state.format = format;
+  } else {
+    state.format = 'SCENE';
   }
+  state.modelRoot.add(object);
+  state.modelRoot.updateMatrixWorld(true);
 
-  fitWorldToModel();
-  // Scale point-cloud dot size relative to the model so PLY scans stay visible
-  for (const rec of state.meshes) {
-    if (rec.isPoints && rec.mesh.material && rec.mesh.material.isPointsMaterial && state.modelRadius) {
-      rec.mesh.material.size = state.modelRadius * 0.01;
+  // Placement
+  const objBox = new THREE.Box3().setFromObject(object);
+  if (!objBox.isEmpty()) {
+    if (opts.place === 'floor') {
+      // shapes: sit on the floor (y = 0) or on the scene's lowest point, beside existing content
+      const floorY = sceneBox && !sceneBox.isEmpty() ? Math.min(sceneBox.min.y, 0) : 0;
+      const d = new THREE.Vector3(0, floorY - objBox.min.y, 0);
+      if (sceneBox && !sceneBox.isEmpty()) {
+        const gap = objBox.getSize(new THREE.Vector3()).x * 0.4;
+        d.x = sceneBox.max.x + gap - objBox.min.x;
+        d.z = (sceneBox.min.z + sceneBox.max.z) / 2 - (objBox.min.z + objBox.max.z) / 2;
+      } else {
+        d.x = -(objBox.min.x + objBox.max.x) / 2;
+        d.z = -(objBox.min.z + objBox.max.z) / 2;
+      }
+      moveWorld(object, d);
+    } else if (sceneBox && !sceneBox.isEmpty()) {
+      // imported models: put them to the right of what's already in the scene
+      const gap = Math.max(sceneBox.getSize(new THREE.Vector3()).length(), objBox.getSize(new THREE.Vector3()).length()) * 0.08;
+      moveWorld(object, new THREE.Vector3(
+        sceneBox.max.x + gap - objBox.min.x,
+        sceneBox.min.y - objBox.min.y,
+        (sceneBox.min.z + sceneBox.max.z) / 2 - (objBox.min.z + objBox.max.z) / 2));
+    }
+  }
+  object.traverse(rememberOrigTransform);
+  state.meshes.push(...recs);
+
+  // Scale point-cloud dot size relative to the object so PLY scans stay visible
+  const radius = new THREE.Box3().setFromObject(object).getBoundingSphere(new THREE.Sphere()).radius || 1;
+  for (const rec of recs) {
+    if (rec.isPoints && rec.mesh.material && rec.mesh.material.isPointsMaterial) {
+      rec.mesh.material.size = radius * 0.01;
       rec.mesh.material.sizeAttenuation = true;
     }
   }
+
+  if (wasEmpty || opts.frame === 'always') fitWorldToModel();
+  else if (opts.frame === 'ifHidden' && !isInView(object)) fitWorldToModel();
+
   setViewMode(state.viewMode);
   setTool(state.tool, true);
-  setScope(null);
+  setScope(opts.select ? object : null);
   refreshStats();
-  historyReset();
+  if (wasEmpty) historyReset(); else pushHistory();
   updateEmptyState();
   setStatus('Ready', true);
   // The drop box has done its job — get it out of the way (reopen from the left viewport toolbar)
   if (typeof setPanel === 'function' && ui.tray) setPanel('tray', false);
+  return { wasEmpty, recs };
+}
+
+function isInView(obj) {
+  activeCam.updateMatrixWorld();
+  const frustum = new THREE.Frustum().setFromProjectionMatrix(
+    new THREE.Matrix4().multiplyMatrices(activeCam.projectionMatrix, activeCam.matrixWorldInverse));
+  const box = new THREE.Box3().setFromObject(obj);
+  return !box.isEmpty() && frustum.containsPoint(box.getCenter(new THREE.Vector3()));
 }
 
 function clearModel(updateUI = true) {
@@ -672,7 +906,7 @@ function clearModel(updateUI = true) {
     syncMaterialSliders();
     syncPolySliderUI();
     syncTransformInputs();
-    $('insp-scope-label').textContent = $('mat-scope-label').textContent = 'Whole Model';
+    $('insp-scope-label').textContent = $('mat-scope-label').textContent = 'Whole Scene';
     updatePartButtons();
   }
 }
@@ -720,10 +954,11 @@ function updateHeaderMeta() {
     metaEl.textContent = 'Drop a 3D file — nothing is uploaded';
     return;
   }
-  nameEl.textContent = (state.baseName || 'model') + '.' + state.format.toLowerCase();
+  const nObj = state.modelRoot.children.length;
+  nameEl.textContent = nObj > 1 ? `${state.baseName || 'scene'} + ${nObj - 1} more` : (state.baseName || 'model') + (state.format && state.format !== 'SCENE' ? '.' + state.format.toLowerCase() : '');
   const s = modelStats();
-  const sizeStr = state.originalFile ? fmtBytes(state.originalFile.size) + ' • ' : '';
-  metaEl.textContent = `${sizeStr}${fmtK(s.tris)} Tris • ${state.meshes.length} Meshes • ${state.viewMode.toUpperCase()}`;
+  const sizeStr = nObj <= 1 && state.originalFile ? fmtBytes(state.originalFile.size) + ' • ' : '';
+  metaEl.textContent = `${sizeStr}${nObj > 1 ? nObj + ' Objects • ' : ''}${fmtK(s.tris)} Tris • ${state.meshes.length} Meshes • ${state.viewMode.toUpperCase()}`;
 }
 
 function refreshStats() {
@@ -731,7 +966,8 @@ function refreshStats() {
   $('stat-tris-card').textContent = fmtInt(s.tris);
   $('stat-verts-card').textContent = fmtInt(s.verts);
   $('stat-meshes-card').textContent = String(s.meshes);
-  $('insp-model-name').textContent = state.modelRoot ? (state.baseName || 'model') : 'no model loaded';
+  const nObj = state.modelRoot ? state.modelRoot.children.length : 0;
+  $('insp-model-name').textContent = state.modelRoot ? (nObj > 1 ? `Scene • ${nObj} objects` : (state.baseName || 'model')) : 'empty scene';
   $('insp-model-name').title = state.originalFile ? state.originalFile.name : '';
   $('insp-model-format').textContent = state.format;
   $('geom-label').textContent = fmtK(s.tris) + ' tris';
@@ -758,23 +994,35 @@ function updateDownloadOriginal() {
 /* Outliner & scope selection                                          */
 /* ------------------------------------------------------------------ */
 
+const outlinerOpen = new WeakMap(); // object -> expanded?
+
 function buildOutliner() {
   const list = $('outliner-list');
   if (!list) return;
   list.innerHTML = '';
-  const addRow = ({ label, icon, count, active, onclick, title, mesh, dim }) => {
+  const addRow = ({ label, icon, count, active, onclick, title, node, dim, depth = 0, chevron = null, onChevron = null, kind = 'part' }) => {
     const row = document.createElement('div');
     row.className = `group flex items-center rounded transition-all font-body-sm text-body-sm w-full ${active ? 'bg-primary-container text-on-primary-container font-medium' : 'text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface'} ${dim ? 'opacity-50' : ''}`;
+    if (depth) row.style.paddingLeft = depth * 14 + 'px';
+    if (chevron != null) {
+      const c = document.createElement('button');
+      c.type = 'button';
+      c.className = 'pl-1 py-2 shrink-0 text-outline hover:text-on-surface';
+      c.title = chevron ? 'Collapse the list of parts' : 'Show the parts inside this object';
+      c.innerHTML = `<span class="material-symbols-outlined text-base">${chevron ? 'expand_more' : 'chevron_right'}</span>`;
+      c.addEventListener('click', (e) => { e.stopPropagation(); onChevron(); });
+      row.appendChild(c);
+    }
     const main = document.createElement('button');
     main.type = 'button';
-    main.className = 'flex-1 min-w-0 flex items-center gap-space-sm px-space-sm py-2 text-left';
+    main.className = `flex-1 min-w-0 flex items-center gap-space-sm ${chevron != null ? 'pl-1' : 'pl-space-sm'} pr-space-sm py-2 text-left`;
     main.innerHTML = `<span class="material-symbols-outlined text-lg shrink-0">${icon}</span><span class="flex-1 truncate">${escapeHTML(label)}</span>` +
       (count != null ? `<span class="font-label-sm text-label-sm ${active ? 'text-on-primary-container/70' : 'text-outline'} shrink-0">${count}</span>` : '');
     if (title) main.title = title;
     if (onclick) main.addEventListener('click', onclick);
     row.appendChild(main);
-    if (mesh) {
-      main.addEventListener('dblclick', (e) => { e.preventDefault(); renamePart(mesh); });
+    if (node) {
+      main.addEventListener('dblclick', (e) => { e.preventDefault(); renamePart(node); });
       const mk = (ic, tip, fn, extra = '') => {
         const b = document.createElement('button');
         b.type = 'button';
@@ -784,37 +1032,68 @@ function buildOutliner() {
         b.addEventListener('click', (e) => { e.stopPropagation(); fn(); });
         row.appendChild(b);
       };
-      mk(mesh.visible ? 'visibility' : 'visibility_off', mesh.visible ? 'Hide this part' : 'Show this part', () => toggleVisibility(mesh), mesh.visible ? 'opacity-60 group-hover:opacity-100' : '');
-      mk('delete', 'Delete this part', () => { setScope(mesh); opDelete(); }, 'opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-red-300 mr-0.5');
+      mk(node.visible ? 'visibility' : 'visibility_off', node.visible ? `Hide this ${kind}` : `Show this ${kind}`, () => toggleVisibility(node), node.visible ? 'opacity-60 group-hover:opacity-100' : '');
+      mk('delete', `Delete this ${kind}`, () => { setScope(node); opDelete(); }, 'opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-red-300 mr-0.5');
     }
     list.appendChild(row);
     return row;
   };
   if (!state.modelRoot) {
-    addRow({ label: 'Empty scene — drop a model', icon: 'hourglass_empty' });
+    addRow({ label: 'Empty scene — add a shape or drop a model', icon: 'hourglass_empty' });
     return;
   }
-  addRow({ label: 'Whole Model', icon: 'view_in_ar', count: fmtK(modelStats().tris), active: state.scope === null, onclick: () => setScope(null), title: 'Edit the whole model' });
+  addRow({ label: 'Whole Scene', icon: 'view_in_ar', count: fmtK(modelStats().tris), active: state.scope === null, onclick: () => setScope(null), title: 'Select everything in the scene' });
   let activeRow = null;
-  state.meshes.forEach((rec) => {
+  const partRow = (rec, depth) => {
     const row = addRow({
       label: rec.mesh.name || 'mesh',
       icon: rec.isPoints ? 'grain' : 'deployed_code',
       count: rec.isPoints ? fmtK(meshVerts(rec)) : fmtK(meshTris(rec)),
       active: state.scope === rec.mesh,
       onclick: () => setScope(rec.mesh),
-      title: (rec.editable ? 'Click to select this part · double-click to rename' : 'Display-only geometry (skinned / points) · double-click to rename'),
-      mesh: rec.mesh,
+      title: (rec.editable ? 'Click to select · double-click to rename' : 'Display-only geometry (skinned / points) · double-click to rename'),
+      node: rec.mesh,
       dim: !rec.mesh.visible,
+      depth,
     });
     if (state.scope === rec.mesh) activeRow = row;
-  });
+  };
+  for (const obj of state.modelRoot.children) {
+    const recs = objectRecs(obj);
+    const own = recOf(obj);
+    if (own && recs.length === 1) { partRow(own, 0); continue; }   // a single shape / mesh
+    if (!recs.length) continue;
+    const scopeInside = state.scope && state.scope !== obj && isInside(state.scope, obj);
+    let open = outlinerOpen.has(obj) ? outlinerOpen.get(obj) : recs.length <= 40;
+    if (scopeInside && recs.length > 1) open = true;
+    const multi = recs.length > 1;
+    const row = addRow({
+      label: obj.name || 'object',
+      icon: 'category',
+      count: fmtK(recs.reduce((a, r) => a + (r.isPoints ? 0 : meshTris(r)), 0)),
+      active: state.scope === obj || (scopeInside && !multi),
+      onclick: () => setScope(obj),
+      title: `Object with ${recs.length} part${recs.length !== 1 ? 's' : ''} · click to select it all · double-click to rename`,
+      node: obj,
+      dim: !obj.visible,
+      chevron: multi ? open : null,
+      onChevron: () => { outlinerOpen.set(obj, !open); buildOutliner(); },
+      kind: 'object',
+    });
+    if (state.scope === obj || (scopeInside && !multi)) activeRow = row;
+    if (multi && open) recs.forEach((r) => partRow(r, 1));
+  }
   if (activeRow) activeRow.scrollIntoView({ block: 'nearest' });
 }
 
-function setScope(mesh) {
-  state.scope = mesh;
-  const label = mesh ? (mesh.name || 'part') : 'Whole Model';
+function scopeKind() {
+  if (!state.scope) return 'scene';
+  return recOf(state.scope) ? 'part' : 'object';
+}
+
+function setScope(node) {
+  state.scope = node;
+  const label = node ? (node.name || scopeKind()) : 'Whole Scene';
   $('insp-scope-label').textContent = label;
   $('mat-scope-label').textContent = label;
   $('insp-scope-label').title = $('mat-scope-label').title = label;
@@ -874,12 +1153,17 @@ canvas.addEventListener('pointerup', (e) => {
   const targets = state.meshes.filter((r) => !r.isPoints && r.mesh.visible).map((r) => r.mesh);
   const hits = raycaster.intersectObjects(targets, false);
   if (hits.length) {
-    if (state.scope === hits[0].object) return;
-    setScope(hits[0].object);
+    const hit = hits[0].object;
+    const top = topObjectOf(hit) || hit;
+    // First click picks the whole object; clicking it again drills down to the part you clicked.
+    const next = (top === hit || (state.scope && isInside(state.scope, top))) ? hit : top;
+    if (state.scope === next) return;
+    setScope(next);
     if (!selectHintShown) {
       selectHintShown = true;
       const extra = state.meshes.length <= 1 ? ' This model is a single mesh — click <b>Split Parts</b> in the bottom toolbar to break it into separately editable pieces.' : '';
-      toast(`Selected <b>${escapeHTML(hits[0].object.name || 'part')}</b>. Move / Rotate / Scale, color, Duplicate, Hide and Delete now act on this part only. Click empty space (or press Esc) to go back to the whole model.${extra}`, 'info', 7000);
+      const drill = next !== hit ? ' Click it again to pick just the part under the cursor.' : '';
+      toast(`Selected <b>${escapeHTML(next.name || 'part')}</b>. Move / Rotate / Scale, color, Duplicate, Hide and Delete now act on it only.${drill} Esc steps back out; clicking empty space selects the whole scene.${extra}`, 'info', 8000);
     }
   } else if (state.scope) {
     setScope(null);
@@ -983,27 +1267,38 @@ function groundToFloor() {
 /* Material editing                                                    */
 /* ------------------------------------------------------------------ */
 
-function scopeRecs() { return state.scope ? state.meshes.filter((r) => r.mesh === state.scope) : state.meshes; }
+function scopeRecs() { return state.scope ? state.meshes.filter((r) => isInside(r.mesh, state.scope)) : state.meshes; }
 function scopeEditableRecs() { return scopeRecs().filter((r) => r.editable && !r.isPoints); }
 function scopeStats() {
   let tris = 0, verts = 0;
   for (const r of scopeRecs()) { tris += meshTris(r); verts += meshVerts(r); }
   return { tris, verts };
 }
-function scopeName() { return state.scope ? (state.scope.name || 'part') : 'whole model'; }
+function scopeName() { return state.scope ? (state.scope.name || scopeKind()) : 'the whole scene'; }
 
 // Materials are often shared between parts (OBJ/MTL, glTF). Before editing a single part,
 // give it its own copy so the change doesn't leak onto other parts.
 function makeScopeMaterialsUnique() {
   if (!state.scope) return;
-  const rec = recOf(state.scope);
-  if (!rec || rec.isPoints) return;
-  const mine = Array.isArray(rec.baseMaterial) ? rec.baseMaterial : [rec.baseMaterial];
-  const shared = state.meshes.some((r) => r !== rec &&
-    (Array.isArray(r.baseMaterial) ? r.baseMaterial : [r.baseMaterial]).some((m) => mine.includes(m)));
-  if (!shared) return;
-  rec.baseMaterial = cloneMaterial(rec.baseMaterial);
-  if (state.viewMode === 'pbr') rec.mesh.material = rec.baseMaterial;
+  const inside = scopeRecs().filter((r) => !r.isPoints);
+  if (!inside.length) return;
+  const insideSet = new Set(inside);
+  const asList = (m) => (Array.isArray(m) ? m : [m]);
+  const usedOutside = new Set();
+  for (const r of state.meshes) if (!insideSet.has(r)) asList(r.baseMaterial).forEach((m) => usedOutside.add(m));
+  const copies = new Map(); // keep sharing *within* the selection
+  const swap = (m) => {
+    if (!m || !usedOutside.has(m)) return m;
+    if (!copies.has(m)) copies.set(m, m.clone());
+    return copies.get(m);
+  };
+  for (const rec of inside) {
+    const next = Array.isArray(rec.baseMaterial) ? rec.baseMaterial.map(swap) : swap(rec.baseMaterial);
+    const changed = Array.isArray(next) ? next.some((m, i) => m !== rec.baseMaterial[i]) : next !== rec.baseMaterial;
+    if (!changed) continue;
+    rec.baseMaterial = next;
+    if (state.viewMode === 'pbr') rec.mesh.material = rec.baseMaterial;
+  }
 }
 
 function eachScopeMaterial(fn) {
@@ -1366,7 +1661,7 @@ function ensureEditableScope() {
   const list = scopeEditableRecs();
   if (!list.length) {
     toast(state.scope
-      ? 'This part can’t be edited (skinned / point geometry). Select another part or “Whole Model”.'
+      ? 'This part can’t be edited (skinned / point geometry). Select another part or “Whole Scene”.'
       : 'No editable polygon geometry in this model.', 'warn');
     return null;
   }
@@ -1475,30 +1770,37 @@ function syncPolySliderUI() {
 /* ------------------------------------------------------------------ */
 
 function requirePart(action) {
-  if (!state.modelRoot) { toast('Load a model first.', 'warn'); return null; }
+  if (!state.modelRoot) { toast('The scene is empty — add a shape or drop a model first.', 'warn'); return null; }
   if (!state.scope) {
-    toast(`Select a part first to ${action} it — click it in the viewport or in the Outliner (left panel).` +
+    toast(`Select something first to ${action} it — click it in the viewport or in the Outliner (left panel).` +
       (state.meshes.length <= 1 ? ' This model is one single mesh: use <b>Split Parts</b> to break it into pieces.' : ''), 'warn', 6000);
     return null;
   }
-  return recOf(state.scope);
+  return state.scope;
 }
 
-function uniquePartName(base) {
-  const names = new Set(state.meshes.map((r) => r.mesh.name));
-  if (!names.has(base)) return base;
-  let k = 2;
-  while (names.has(`${base}_${k}`)) k++;
-  return `${base}_${k}`;
+function uniquePartName(base) { return uniqueName(base); }
+
+// Remove empty groups left behind after a delete (never the scene root itself)
+function pruneEmpty(node) {
+  while (node && node !== state.modelRoot && node.parent && !objectRecs(node).length) {
+    const p = node.parent;
+    p.remove(node);
+    node = p;
+  }
 }
 
 function opDelete() {
-  const rec = requirePart('delete');
-  if (!rec) return;
-  if (state.meshes.length <= 1) return toast('That’s the only part left — use <b>New Scene</b> in the header to clear everything.', 'warn', 5000);
-  const name = rec.mesh.name;
-  if (rec.mesh.parent) rec.mesh.parent.remove(rec.mesh);
-  state.meshes = state.meshes.filter((r) => r !== rec);
+  const node = requirePart('delete');
+  if (!node) return;
+  const gone = scopeRecs();
+  if (gone.length >= state.meshes.length) return toast('That would leave the scene empty — use <b>New Scene</b> in the header to clear everything.', 'warn', 5000);
+  const name = node.name;
+  const parent = node.parent;
+  if (parent) parent.remove(node);
+  const goneSet = new Set(gone);
+  state.meshes = state.meshes.filter((r) => !goneSet.has(r));
+  pruneEmpty(parent);
   setScope(null);
   refreshStats();
   pushHistory();
@@ -1506,19 +1808,37 @@ function opDelete() {
 }
 
 function opDuplicate() {
-  const rec = requirePart('duplicate');
-  if (!rec) return;
-  if (rec.mesh.isSkinnedMesh) return toast('Animated (skinned) parts can’t be duplicated.', 'warn');
-  const src = rec.mesh;
-  const copy = src.clone(false);
-  copy.material = cloneMaterial(rec.baseMaterial);
-  copy.name = uniquePartName(src.name + '_copy');
+  const src = requirePart('duplicate');
+  if (!src) return;
+  const srcRecs = scopeRecs();
+  let copy;
+  if (recOf(src)) {
+    if (src.isSkinnedMesh) return toast('Animated (skinned) parts can’t be duplicated on their own — select the whole object instead.', 'warn', 5000);
+    copy = src.clone(false);
+  } else {
+    copy = SkeletonUtils.clone(src); // handles skinned meshes & skeletons
+  }
+  // pair up original and copied meshes (same tree shape) to build records with their own materials
+  const a = [], b = [];
+  src.traverse((o) => a.push(o));
+  copy.traverse((o) => b.push(o));
+  const taken = sceneNames();
+  const newRecs = [];
+  a.forEach((o, i) => {
+    const rec = srcRecs.find((r) => r.mesh === o);
+    if (!rec || !b[i]) return;
+    const m = b[i];
+    m.material = cloneMaterial(rec.baseMaterial);
+    if (m !== copy) { m.name = uniqueName(o.name + '_copy', taken); taken.add(m.name); }
+    newRecs.push({ mesh: m, baseMaterial: m.material, baseline: rec.baseline, pct: rec.pct, editable: rec.editable, isPoints: rec.isPoints });
+  });
+  copy.name = uniqueName(src.name + '_copy', taken);
   src.parent.add(copy);
   // offset the copy sideways by ~its own width so it doesn't overlap the original
   const size = new THREE.Box3().setFromObject(src).getSize(new THREE.Vector3());
   moveWorld(copy, new THREE.Vector3(Math.max(size.x * 1.1, (state.modelRadius || 1) * 0.05), 0, 0));
-  rememberOrigTransform(copy);
-  state.meshes.push({ mesh: copy, baseMaterial: copy.material, baseline: rec.baseline, pct: rec.pct, editable: rec.editable, isPoints: rec.isPoints });
+  copy.traverse(rememberOrigTransform);
+  state.meshes.push(...newRecs);
   setViewMode(state.viewMode);
   setScope(copy);
   refreshStats();
@@ -1526,18 +1846,18 @@ function opDuplicate() {
   toast(`Duplicated as <b>${escapeHTML(copy.name)}</b> — it’s selected, drag the gizmo to place it.`, 'success', 3500);
 }
 
-function toggleVisibility(mesh) {
-  if (!mesh) { const rec = requirePart('hide'); if (!rec) return; mesh = rec.mesh; }
-  mesh.visible = !mesh.visible;
+function toggleVisibility(node) {
+  if (!node) { node = requirePart('hide'); if (!node) return; }
+  node.visible = !node.visible;
   buildOutliner();
   updatePartButtons();
   updateSelBox();
   pushHistory();
-  toast(`${mesh.visible ? 'Showing' : 'Hid'} <b>${escapeHTML(mesh.name)}</b>${mesh.visible ? '' : ' — hidden parts are left out of exports. Click the eye in the Outliner to show it again.'}`, 'info', 3200);
+  toast(`${node.visible ? 'Showing' : 'Hid'} <b>${escapeHTML(node.name)}</b>${node.visible ? '' : ' — hidden things are left out of exports. Click the eye in the Outliner to show it again.'}`, 'info', 3200);
 }
 
 function renamePart(mesh) {
-  const name = window.prompt('Rename part:', mesh.name);
+  const name = window.prompt('Rename:', mesh.name);
   if (name == null) return;
   const clean = name.trim().slice(0, 80);
   if (!clean || clean === mesh.name) return;
@@ -1644,12 +1964,20 @@ function opSplit() {
   setLoading(true, 'Splitting into parts…');
   setTimeout(() => {
     try {
-      let created = 0, splitCount = 0, lumped = false;
+      let created = 0, splitCount = 0, lumped = false, lastSplitObject = null;
       for (const rec of recs) {
         const parts = splitGeometry(rec.mesh.geometry);
         if (!parts) continue;
         const src = rec.mesh;
-        const parent = src.parent;
+        let parent = src.parent;
+        let wrapper = null;
+        if (parent === state.modelRoot) {
+          // a stand-alone shape: keep its pieces together as one object
+          wrapper = new THREE.Group();
+          wrapper.visible = src.visible;
+          parent.add(wrapper);
+          parent = wrapper;
+        }
         const mats = Array.isArray(rec.baseMaterial) ? rec.baseMaterial : [rec.baseMaterial];
         const newRecs = parts.map((part, i) => {
           const mat = cloneMaterial(mats[part.materialIndex] || mats[0]);
@@ -1657,14 +1985,20 @@ function opSplit() {
           const matName = mat && mat.name ? mat.name : '';
           m.name = uniquePartName(`${src.name}_${part.lumped ? 'small_bits' : (matName && parts.length < 30 ? matName : 'part' + (i + 1))}`);
           m.position.copy(src.position); m.quaternion.copy(src.quaternion); m.scale.copy(src.scale);
-          m.visible = src.visible;
+          m.visible = wrapper ? true : src.visible;
           centerGeometryPivot(m);
           rememberOrigTransform(m);
           parent.add(m);
           if (part.lumped) lumped = true;
           return { mesh: m, baseMaterial: mat, baseline: part.geometry, pct: 100, editable: true, isPoints: false };
         });
-        parent.remove(src);
+        src.parent.remove(src);
+        if (wrapper) {
+          wrapper.name = uniqueName(src.name);
+          centerObjectPivot(wrapper);
+          rememberOrigTransform(wrapper);
+        }
+        lastSplitObject = topObjectOf(newRecs[0].mesh);
         const at = state.meshes.indexOf(rec);
         state.meshes.splice(at, 1, ...newRecs);
         created += newRecs.length;
@@ -1675,7 +2009,7 @@ function opSplit() {
         return;
       }
       setViewMode(state.viewMode);
-      setScope(null);
+      setScope(splitCount === 1 ? lastSplitObject : null);
       refreshStats();
       pushHistory();
       toast(`Split into <b>${created}</b> separate parts${lumped ? ` (tiny fragments grouped as “small_bits”)` : ''}. Click any part to select it, then move, recolor, hide or delete it. Ctrl+Z to undo.`, 'success', 7000);
@@ -1693,19 +2027,21 @@ function opSplit() {
 /* ------------------------------------------------------------------ */
 
 function historySnapshot() {
+  const nodes = [];
+  state.modelRoot.traverse((o) => {
+    if (o === state.modelRoot) return;
+    nodes.push({ node: o, parent: o.parent, name: o.name, visible: o.visible, pos: o.position.clone(), quat: o.quaternion.clone(), scale: o.scale.clone() });
+  });
   return {
     pos: state.modelRoot.position.clone(),
     quat: state.modelRoot.quaternion.clone(),
     scale: state.modelRoot.scale.clone(),
     scope: state.scope,
+    baseName: state.baseName,
+    format: state.format,
+    nodes,
     recs: state.meshes.map((r) => ({
       mesh: r.mesh,
-      parent: r.mesh.parent,
-      name: r.mesh.name,
-      visible: r.mesh.visible,
-      mpos: r.mesh.position.clone(),
-      mquat: r.mesh.quaternion.clone(),
-      mscale: r.mesh.scale.clone(),
       material: cloneMaterial(r.baseMaterial),
       geometry: r.mesh.geometry,
       baseline: r.baseline,
@@ -1727,26 +2063,32 @@ function pushHistory() {
 
 function applySnapshot(s) {
   if (!s || !state.modelRoot) return;
-  state.modelRoot.position.copy(s.pos);
-  state.modelRoot.quaternion.copy(s.quat);
-  state.modelRoot.scale.copy(s.scale);
-  // Detach parts that don't exist in this snapshot (e.g. undoing a duplicate / split)
-  const keep = new Set(s.recs.map((r) => r.mesh));
-  for (const rec of state.meshes) {
-    if (!keep.has(rec.mesh) && rec.mesh.parent) rec.mesh.parent.remove(rec.mesh);
+  const root = state.modelRoot;
+  root.position.copy(s.pos);
+  root.quaternion.copy(s.quat);
+  root.scale.copy(s.scale);
+  state.baseName = s.baseName;
+  state.format = s.format;
+  // 1) take out anything that didn't exist at that point (e.g. undoing an add / duplicate / split)
+  const keep = new Set(s.nodes.map((n) => n.node));
+  const current = [];
+  root.traverse((o) => { if (o !== root) current.push(o); });
+  for (const o of current) if (!keep.has(o) && o.parent) o.parent.remove(o);
+  // 2) put everything back where it was (re-attaches deleted things), parents before children
+  for (const n of s.nodes) {
+    if (n.node.parent !== n.parent) n.parent.add(n.node);
+    n.node.name = n.name;
+    n.node.visible = n.visible;
+    n.node.position.copy(n.pos);
+    n.node.quaternion.copy(n.quat);
+    n.node.scale.copy(n.scale);
   }
   state.meshes = s.recs.map((r) => {
-    if (r.parent && r.mesh.parent !== r.parent) r.parent.add(r.mesh); // re-attach deleted parts
-    r.mesh.name = r.name;
-    r.mesh.visible = r.visible;
-    r.mesh.position.copy(r.mpos);
-    r.mesh.quaternion.copy(r.mquat);
-    r.mesh.scale.copy(r.mscale);
     r.mesh.geometry = r.geometry;
     // clone again so later edits never mutate the stored snapshot
     return { mesh: r.mesh, baseMaterial: cloneMaterial(r.material), baseline: r.baseline, pct: r.pct, editable: r.editable, isPoints: r.isPoints };
   });
-  state.scope = s.scope && state.meshes.some((x) => x.mesh === s.scope) ? s.scope : null;
+  state.scope = s.scope && keep.has(s.scope) ? s.scope : null;
   setViewMode(state.viewMode);
   setScope(state.scope);
 }
@@ -1864,11 +2206,19 @@ async function doExport() {
   label.textContent = 'Baking geometry…';
   await new Promise((r) => setTimeout(r, 40));
   // Hidden parts are left out of the export
-  const hidden = state.meshes.filter((r) => !r.mesh.visible && r.mesh.parent).map((r) => [r.mesh, r.mesh.parent]);
+  const hidden = [];
+  state.modelRoot.traverse((o) => { if (o !== state.modelRoot && !o.visible && o.parent) hidden.push([o, o.parent]); });
   hidden.forEach(([m, p]) => p.remove(m));
   try {
     let blob, name;
-    if (fmt === 'obj') {
+    if (fmt === 'obj' && $('chk-obj-zip').checked) {
+      label.textContent = 'Packing .zip…';
+      const base = safeFileName(state.baseName) + '_edited';
+      const res = await buildOBJZip(state.modelRoot, base);
+      blob = new Blob([res.zipped], { type: 'application/zip' });
+      name = `${base}.zip`;
+      if (res.skipped.length) toast(`Some textures couldn’t be converted to PNG and were left out (${escapeHTML(res.skipped.slice(0, 4).join(', '))}). Use GLB to keep them.`, 'warn', 7000);
+    } else if (fmt === 'obj') {
       const text = new OBJExporter().parse(state.modelRoot);
       blob = new Blob([text], { type: 'text/plain' });
       name = `${state.baseName}_edited.obj`;
@@ -1893,10 +2243,133 @@ async function doExport() {
     console.error('[Online3D] export failed:', err);
     toast(`Export failed: ${escapeHTML((err && err.message) || String(err))}`, 'error', 7000);
   } finally {
-    hidden.forEach(([m, p]) => p.add(m));
+    hidden.reverse().forEach(([m, p]) => p.add(m));
     btn.disabled = false;
-    setTimeout(() => { label.textContent = `Download Model (${state.exportFormat.toUpperCase()})`; }, 1200);
+    setTimeout(updateDownloadLabel, 1200);
   }
+}
+
+/* ---------- OBJ + MTL + textures, zipped ----------
+   three's OBJExporter writes shape only, so this writer adds usemtl / mtllib and the texture images. */
+
+const safeFileName = (s) => String(s || 'item').replace(/[^\w.-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 60) || 'item';
+
+async function textureToPNG(tex) {
+  const img = tex && tex.image;
+  if (!img) return null;
+  const w = img.width || img.videoWidth, h = img.height || img.videoHeight;
+  if (!w || !h) return null;
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const g = c.getContext('2d');
+  if (img.data && !(img instanceof HTMLImageElement)) {
+    // DataTexture (raw RGBA bytes)
+    if (!(img.data instanceof Uint8Array || img.data instanceof Uint8ClampedArray) || img.data.length !== w * h * 4) return null;
+    g.putImageData(new ImageData(new Uint8ClampedArray(img.data), w, h), 0, 0);
+  } else {
+    try { g.drawImage(img, 0, 0, w, h); } catch (e) { return null; }
+  }
+  const blob = await new Promise((r) => c.toBlob(r, 'image/png'));
+  return blob ? new Uint8Array(await blob.arrayBuffer()) : null;
+}
+
+async function buildOBJZip(root, baseName) {
+  const fmt = (n) => (Math.abs(n) < 1e-10 ? '0' : +n.toFixed(6) + '');
+  const matName = new Map(), usedMat = new Set();
+  const texName = new Map(), usedTex = new Set();
+  const files = {};
+  const skipped = [];
+  let obj = `# Exported by Online 3D Studio\nmtllib ${baseName}.mtl\n`;
+  let mtl = `# Exported by Online 3D Studio\n`;
+  let vOff = 1, tOff = 1, nOff = 1;
+
+  const nameMat = (m) => {
+    if (matName.has(m)) return matName.get(m);
+    let n = safeFileName(m && m.name ? m.name : 'material'); let k = 2, b = n;
+    while (usedMat.has(n)) n = `${b}_${k++}`;
+    usedMat.add(n); matName.set(m, n);
+    return n;
+  };
+  const addTex = async (tex, hint) => {
+    if (!tex || !tex.image) return null;
+    if (texName.has(tex.image)) return texName.get(tex.image);
+    const png = await textureToPNG(tex);
+    if (!png) { skipped.push(hint); texName.set(tex.image, null); return null; }
+    let n = safeFileName(tex.name || hint); let k = 2, b = n;
+    while (usedTex.has(n)) n = `${b}_${k++}`;
+    usedTex.add(n);
+    const path = `textures/${n}.png`;
+    files[path] = [png, { level: 0 }]; // PNGs are already compressed
+    texName.set(tex.image, path);
+    return path;
+  };
+
+  root.updateMatrixWorld(true);
+  const meshes = [];
+  root.traverse((o) => { if (o.isMesh && o.geometry && o.geometry.getAttribute('position')) meshes.push(o); });
+  const v = new THREE.Vector3(), nrm = new THREE.Vector3(), col = new THREE.Color(), nm = new THREE.Matrix3();
+  for (const mesh of meshes) {
+    const g = mesh.geometry;
+    const pos = g.getAttribute('position'), normal = g.getAttribute('normal'), uv = g.getAttribute('uv'), color = g.getAttribute('color');
+    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    const flipV = mats.some((m) => m && m.map && m.map.flipY === false); // glTF-style UVs
+    nm.getNormalMatrix(mesh.matrixWorld);
+    const mirrored = mesh.matrixWorld.determinant() < 0;
+    obj += `o ${safeFileName(mesh.name)}\n`;
+    for (let i = 0; i < pos.count; i++) {
+      v.fromBufferAttribute(pos, i).applyMatrix4(mesh.matrixWorld);
+      obj += `v ${fmt(v.x)} ${fmt(v.y)} ${fmt(v.z)}`;
+      if (color) { col.fromBufferAttribute(color, i).convertLinearToSRGB(); obj += ` ${fmt(col.r)} ${fmt(col.g)} ${fmt(col.b)}`; }
+      obj += '\n';
+    }
+    if (uv) for (let i = 0; i < uv.count; i++) obj += `vt ${fmt(uv.getX(i))} ${fmt(flipV ? 1 - uv.getY(i) : uv.getY(i))}\n`;
+    if (normal) for (let i = 0; i < normal.count; i++) { nrm.fromBufferAttribute(normal, i).applyMatrix3(nm).normalize(); obj += `vn ${fmt(nrm.x)} ${fmt(nrm.y)} ${fmt(nrm.z)}\n`; }
+    const idx = g.index ? g.index.array : null;
+    const count = idx ? idx.length : pos.count;
+    const groups = g.groups && g.groups.length ? g.groups : [{ start: 0, count, materialIndex: 0 }];
+    const ref = (i) => {
+      const a = (idx ? idx[i] : i);
+      const pv = a + vOff, pt = a + tOff, pn = a + nOff;
+      return uv && normal ? `${pv}/${pt}/${pn}` : normal ? `${pv}//${pn}` : uv ? `${pv}/${pt}` : `${pv}`;
+    };
+    let lastMat;
+    for (const grp of groups) {
+      const m = mats[grp.materialIndex || 0] || mats[0];
+      if (m !== lastMat) { obj += `usemtl ${nameMat(m)}\n`; lastMat = m; }
+      const end = Math.min(grp.start + grp.count, count);
+      for (let t = grp.start; t + 2 < end; t += 3) {
+        obj += mirrored ? `f ${ref(t)} ${ref(t + 2)} ${ref(t + 1)}\n` : `f ${ref(t)} ${ref(t + 1)} ${ref(t + 2)}\n`;
+      }
+    }
+    vOff += pos.count; if (uv) tOff += uv.count; if (normal) nOff += normal.count;
+  }
+
+  for (const [m, n] of matName) {
+    mtl += `\nnewmtl ${n}\n`;
+    const c = m && m.color ? m.color.clone().convertLinearToSRGB() : new THREE.Color(0.8, 0.8, 0.8);
+    mtl += `Ka 0 0 0\nKd ${fmt(c.r)} ${fmt(c.g)} ${fmt(c.b)}\n`;
+    const rough = m && m.roughness != null ? m.roughness : 0.8;
+    const metal = m && m.metalness != null ? m.metalness : 0;
+    const spec = 0.04 + metal * 0.5 * (1 - rough);
+    mtl += `Ks ${fmt(spec)} ${fmt(spec)} ${fmt(spec)}\nNs ${Math.round((1 - rough) * (1 - rough) * 900 + 4)}\n`;
+    if (m && m.emissive && m.emissive.getHex() !== 0) {
+      const e = m.emissive.clone().multiplyScalar(Math.min(m.emissiveIntensity ?? 1, 1)).convertLinearToSRGB();
+      mtl += `Ke ${fmt(e.r)} ${fmt(e.g)} ${fmt(e.b)}\n`;
+    }
+    mtl += `d ${fmt(m && m.opacity != null ? m.opacity : 1)}\nillum 2\n`;
+    mtl += `Pr ${fmt(rough)}\nPm ${fmt(metal)}\n`;
+    if (m) {
+      const kd = await addTex(m.map, n + '_color'); if (kd) mtl += `map_Kd ${kd}\n`;
+      const nmap = await addTex(m.normalMap, n + '_normal'); if (nmap) mtl += `norm ${nmap}\n`;
+      const bump = await addTex(m.bumpMap, n + '_bump'); if (bump) mtl += `map_Bump ${bump}\n`;
+      const em = await addTex(m.emissiveMap, n + '_emissive'); if (em) mtl += `map_Ke ${em}\n`;
+      const al = await addTex(m.alphaMap, n + '_alpha'); if (al) mtl += `map_d ${al}\n`;
+    }
+  }
+  files[`${baseName}.obj`] = strToU8(obj);
+  files[`${baseName}.mtl`] = strToU8(mtl);
+  const zipped = zipSync(files, { level: 6 });
+  return { zipped, skipped, textures: usedTex.size, materials: usedMat.size };
 }
 
 function downloadOriginal() {
@@ -1919,7 +2392,69 @@ function setExportFormat(fmt) {
     b.classList.toggle('font-semibold', on);
     b.classList.toggle('text-on-surface-variant', !on);
   });
-  $('btn-download-label').textContent = `Download Model (${fmt.toUpperCase()})`;
+  updateDownloadLabel();
+}
+function updateDownloadLabel() {
+  const fmt = state.exportFormat;
+  const zip = fmt === 'obj' && $('chk-obj-zip').checked;
+  $('obj-zip-row').classList.toggle('hidden', fmt !== 'obj');
+  $('btn-download-label').textContent = `Download Model (${zip ? 'OBJ .zip' : fmt.toUpperCase()})`;
+}
+
+/* ------------------------------------------------------------------ */
+/* Simple shapes                                                       */
+/* ------------------------------------------------------------------ */
+
+const SHAPE_COLORS = [0x7aa2ff, 0xff8a65, 0x81c784, 0xffd54f, 0xba68c8, 0x4dd0e1, 0xf06292, 0xa1887f];
+let shapeCount = 0;
+const shapeObjects = new WeakSet();
+const SHAPES = {
+  cube: { label: 'Cube', make: (u) => new THREE.BoxGeometry(u, u, u) },
+  sphere: { label: 'Sphere', make: (u) => new THREE.SphereGeometry(u / 2, 48, 32) },
+  cylinder: { label: 'Cylinder', make: (u) => new THREE.CylinderGeometry(u / 2, u / 2, u, 48) },
+  cone: { label: 'Cone', make: (u) => new THREE.ConeGeometry(u / 2, u, 48) },
+  pyramid: { label: 'Pyramid', make: (u) => new THREE.ConeGeometry(u / Math.SQRT2, u, 4).rotateY(Math.PI / 4) },
+  torus: { label: 'Torus', make: (u) => new THREE.TorusGeometry(u * 0.36, u * 0.14, 32, 64).rotateX(-Math.PI / 2) },
+  plane: { label: 'Plane', make: (u) => new THREE.PlaneGeometry(u * 1.5, u * 1.5).rotateX(-Math.PI / 2), doubleSided: true },
+  capsule: { label: 'Capsule', make: (u) => new THREE.CapsuleGeometry(u * 0.3, u * 0.5, 12, 32) },
+};
+
+function addShape(kind) {
+  const def = SHAPES[kind];
+  if (!def) return;
+  // Size it like a typical object already in the scene (1 unit in an empty scene):
+  // the median of the objects' largest dimensions — half that next to imported models.
+  let u = 1;
+  if (state.modelRoot && state.modelRoot.children.length) {
+    const dims = [];
+    let anyShape = false;
+    for (const o of state.modelRoot.children) {
+      const b = new THREE.Box3().setFromObject(o);
+      if (b.isEmpty()) continue;
+      const sz = b.getSize(new THREE.Vector3());
+      dims.push(Math.max(sz.x, sz.y, sz.z));
+      if (shapeObjects.has(o)) anyShape = true;
+    }
+    if (dims.length) {
+      dims.sort((a, b) => a - b);
+      u = Math.max(dims[Math.floor(dims.length / 2)] * (anyShape ? 1 : 0.5), 1e-3);
+    }
+  }
+  const color = SHAPE_COLORS[shapeCount++ % SHAPE_COLORS.length];
+  const mat = new THREE.MeshStandardMaterial({
+    name: def.label.toLowerCase() + '_material', color, roughness: 0.5, metalness: 0.05,
+    side: def.doubleSided ? THREE.DoubleSide : THREE.FrontSide,
+  });
+  const mesh = new THREE.Mesh(def.make(u), mat);
+  try {
+    shapeObjects.add(mesh);
+    addToScene(mesh, 'SHAPE', { name: def.label, place: 'floor', frame: 'ifHidden', select: true });
+  } catch (e) {
+    return toast('Couldn’t add the shape: ' + escapeHTML(e.message || String(e)), 'error');
+  }
+  $('shape-popover').classList.add('hidden');
+  if (state.tool === 'select') setTool('move');
+  toast(`Added a <b>${def.label}</b> — it’s selected: drag the arrows to move it, or use Rotate / Scale and the color controls in the Inspector.`, 'success', 4500);
 }
 
 /* ------------------------------------------------------------------ */
@@ -2006,10 +2541,8 @@ async function loadSample(key) {
   setLoading(true, `Fetching sample: ${s.label}…`);
   try {
     const obj = await s.load();
-    state.originalFile = null;
-    state.baseName = key === 'torus' ? 'torus_knot' : key;
-    updateDownloadOriginal();
-    setModel(obj, s.fmt);
+    if (!state.modelRoot) { state.originalFile = null; updateDownloadOriginal(); }
+    addToScene(obj, s.fmt, { name: key === 'torus' ? 'torus_knot' : key, frame: 'always' });
     toast(`Sample loaded: <b>${s.label}</b> (${s.fmt}). Drag to orbit, scroll to zoom, try the edit tools!`, 'success', 4200);
   } catch (err) {
     console.error('[Online3D] sample failed:', err);
@@ -2126,6 +2659,14 @@ $('btn-decimate').addEventListener('click', opDecimate);
 $('btn-mirror').addEventListener('click', opMirror);
 $('btn-normals').addEventListener('click', opSmoothNormals);
 $('btn-split').addEventListener('click', opSplit);
+// Add Shape menu
+const shapePop = $('shape-popover');
+$('btn-add-shape').addEventListener('click', (e) => { e.stopPropagation(); shapePop.classList.toggle('hidden'); });
+$('btn-empty-add-shape').addEventListener('click', (e) => { e.stopPropagation(); shapePop.classList.remove('hidden'); });
+document.querySelectorAll('.add-shape-btn').forEach((b) => b.addEventListener('click', () => addShape(b.dataset.shape)));
+document.addEventListener('click', (e) => {
+  if (!shapePop.contains(e.target) && !e.target.closest('#btn-add-shape, #btn-empty-add-shape')) shapePop.classList.add('hidden');
+});
 $('btn-duplicate').addEventListener('click', opDuplicate);
 $('btn-hide').addEventListener('click', () => toggleVisibility());
 $('btn-delete').addEventListener('click', opDelete);
@@ -2225,6 +2766,7 @@ document.querySelectorAll('.mat-preset-btn').forEach((b) => b.addEventListener('
 // Export
 document.querySelectorAll('.export-format-btn').forEach((b) => b.addEventListener('click', () => setExportFormat(b.dataset.fmt)));
 $('btn-download').addEventListener('click', doExport);
+$('chk-obj-zip').addEventListener('change', updateDownloadLabel);
 $('btn-header-export').addEventListener('click', () => {
   doExport();
   $('right-dock').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -2334,8 +2876,12 @@ window.addEventListener('keydown', (e) => {
     case 'delete':
     case 'backspace': e.preventDefault(); opDelete(); break;
     case 'escape':
-      if (document.body.classList.contains('preview-mode')) setPreview(false);
-      else if (state.scope) setScope(null);
+      if (!$('shape-popover').classList.contains('hidden')) $('shape-popover').classList.add('hidden');
+      else if (document.body.classList.contains('preview-mode')) setPreview(false);
+      else if (state.scope) {
+        const top = topObjectOf(state.scope);
+        setScope(top && top !== state.scope ? top : null);
+      }
       else setTool('select');
       break;
   }
@@ -2359,6 +2905,7 @@ syncMaterialSliders();
 syncPolySliderUI();
 updatePresetChips();
 updatePartButtons();
+updateDownloadLabel();
 
 console.info('%cOnline 3D Studio ready — three.js r170, 100% client-side.', 'color:#4cd7f6;font-weight:bold;');
 
