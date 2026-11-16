@@ -681,13 +681,23 @@
 </div>
 <div class="panel-body flex flex-col gap-space-xs" data-section-body="textures">
 <div class="grid grid-cols-2 gap-1.5">
-<button class="px-2 py-1.5 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface text-[11px] font-body-sm flex items-center justify-center gap-1 transition-colors" id="btn-import-texture" title="Add PNG / JPEG / WebP images to the library (JPEGs are converted to PNG)" type="button">
+<button class="px-2 py-1.5 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface text-[11px] font-body-sm flex items-center justify-center gap-1 transition-colors" id="btn-import-texture" title="Add PNG / JPEG / WebP images — or a .zip of them — to the library (JPEGs are converted to PNG)" type="button">
 <span class="material-symbols-outlined text-sm">add_photo_alternate</span>
 <span>Import Texture</span>
 </button>
 <button class="px-2 py-1.5 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface text-[11px] font-body-sm flex items-center justify-center gap-1 transition-colors" id="btn-add-image" title="Place a picture in the scene as a flat panel" type="button">
 <span class="material-symbols-outlined text-sm">image</span>
 <span>Add Image to Scene</span>
+</button>
+</div>
+<div class="grid grid-cols-2 gap-1.5">
+<button class="px-2 py-1.5 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface text-[11px] font-body-sm flex items-center justify-center gap-1 transition-colors" id="btn-match-textures" title="Choose which texture set goes on each material — sets are recognised from file names (…_BaseColor, …_Normal, …_Roughness…)" type="button">
+<span class="material-symbols-outlined text-sm">join</span>
+<span>Match textures…</span>
+</button>
+<button class="px-2 py-1.5 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface text-[11px] font-body-sm flex items-center justify-center gap-1 transition-colors" id="btn-flip-normal" title="If bumps and stitching look pushed in instead of out, the normal map is DirectX-style — flip it" type="button">
+<span class="material-symbols-outlined text-sm">swap_vert</span>
+<span>Flip normal map</span>
 </button>
 </div>
 <p class="font-label-sm text-[10px] text-outline leading-snug" id="tex-help">Click a thumbnail to put that texture on the selected part (or the whole scene). Textures that came with your model show up here too.</p>
@@ -779,8 +789,23 @@
 </div>
 <!-- Preview mode exit -->
 <button class="fixed bottom-4 right-4 z-[60] items-center gap-1.5 px-3 py-2 rounded-xl bg-surface-container-low/90 backdrop-blur-xl ring-1 ring-white/15 shadow-2xl text-on-surface font-body-sm text-body-sm hover:bg-surface-container-high transition-colors" id="btn-exit-preview" type="button"><span class="material-symbols-outlined text-base">close_fullscreen</span>Exit Preview (Esc)</button>
-<input accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" class="hidden" id="texture-input" multiple type="file"/>
+<input accept=".png,.jpg,.jpeg,.webp,.zip,image/png,image/jpeg,image/webp,application/zip" class="hidden" id="texture-input" multiple type="file"/>
 <input accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" class="hidden" id="image-input" type="file"/>
+<!-- Match Textures panel -->
+<div class="hidden fixed inset-0 z-[80] bg-black/60 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-6" id="match-modal">
+<div class="w-full sm:max-w-2xl max-h-[85dvh] flex flex-col rounded-t-2xl sm:rounded-2xl bg-surface-container-low ring-1 ring-white/10 shadow-2xl">
+<div class="p-4 border-b border-white/10">
+<div class="font-headline-md text-headline-md text-on-surface">Match textures</div>
+<p class="font-body-sm text-body-sm text-on-surface-variant mt-1">Which texture set goes on each material of <b id="match-title">your model</b>? Sets are recognised from file names (…_BaseColor, …_Normal, …_Roughness, Spec…). Best guesses are filled in.</p>
+</div>
+<div class="flex-1 min-h-0 overflow-y-auto p-3 flex flex-col gap-1.5" id="match-rows"></div>
+<div class="p-3 border-t border-white/10 flex flex-wrap items-center gap-2">
+<label class="flex items-center gap-2 mr-auto font-body-sm text-body-sm text-on-surface-variant" title="Use when bumps look pushed in instead of out (DirectX-style normal maps)"><input class="accent-primary" id="match-flip" type="checkbox"/>Flip normal maps (DirectX)</label>
+<button class="px-3 py-2 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface font-body-sm text-body-sm" id="match-cancel" type="button">Cancel</button>
+<button class="px-4 py-2 rounded-lg bg-primary text-on-primary font-body-sm text-body-sm font-semibold" id="match-apply" type="button">Apply</button>
+</div>
+</div>
+</div>
 <input accept=".zip,.obj,.fbx,.glb,.gltf,.stl,.ply,.dae,.3mf,.blend,.mtl,.bin,.png,.jpg,.jpeg,.webp,.bmp,.tga" class="hidden" id="file-input" multiple type="file"/>
 </main></div>
 <script type="module" src="app.js"></script></body></html>
