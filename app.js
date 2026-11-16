@@ -33,7 +33,7 @@ import { unzipSync, zipSync, strToU8, strFromU8 } from 'three/addons/libs/fflate
 
 // App version — shown in the header. Rules: +0.1 for a small feature update, +1 for a revamp or
 // major feature update, and a letter suffix (b, c, d…) for bug-fix-only releases of the same version.
-const APP_VERSION = 'v2.1';
+const APP_VERSION = 'v2.2';
 
 const THREE_CDN = 'https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/';
 const GH_MODELS = 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r170/examples/models/';
@@ -181,6 +181,10 @@ controls.dampingFactor = 0.08;
 controls.target.set(0, 0.5, 0);
 controls.minDistance = 0.05;
 controls.maxDistance = 100;
+// Left: orbit · Middle: move (pan) · Right: move (pan) · Wheel: zoom · Shift/Ctrl + left: move (trackpads)
+controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.PAN };
+// stop Windows' middle-click auto-scroll from kicking in over the 3D view
+canvas.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); });
 
 function syncOrthoFromPersp() {
   const dist = Math.max(persp.position.distanceTo(controls.target), 1e-4);
@@ -1357,6 +1361,7 @@ function setScope(node) {
   syncTextureControls();
   renderTexLibrary();
   updateMaterialScopeLabel();
+  if (typeof updateKnifePanel === 'function') updateKnifePanel();
 }
 
 function updatePartButtons() {
@@ -1395,7 +1400,7 @@ canvas.addEventListener('pointerup', (e) => {
   if (!downPos) return;
   const moved = Math.hypot(e.clientX - downPos[0], e.clientY - downPos[1]);
   downPos = null;
-  if (moved > 5 || downOnGizmo || e.button !== 0 || !state.modelRoot) return;
+  if (moved > 5 || downOnGizmo || e.button !== 0 || !state.modelRoot || state.tool === 'knife') return;
   const rect = canvas.getBoundingClientRect();
   const ndc = new THREE.Vector2(
     ((e.clientX - rect.left) / rect.width) * 2 - 1,
@@ -1427,12 +1432,13 @@ canvas.addEventListener('pointerup', (e) => {
 /* Tools & transform gizmo                                             */
 /* ------------------------------------------------------------------ */
 
-const TOOL_MODE = { select: null, move: 'translate', rotate: 'rotate', scale: 'scale', faces: null };
+const TOOL_MODE = { select: null, move: 'translate', rotate: 'rotate', scale: 'scale', faces: null, knife: null };
 function setTool(tool, force) {
   if (!force && tool === state.tool) return;
   const was = state.tool;
   state.tool = tool;
   attachGizmo();
+  if (typeof updateKnifePanel === 'function') updateKnifePanel();
   if (tool === 'faces' || was === 'faces') {
     if (tool !== 'faces') state.faceSel = null;
     refreshFaceOverlay();
@@ -3137,6 +3143,388 @@ function deleteSelectedFaces() {
 }
 
 /* ------------------------------------------------------------------ */
+/* Knife: slice parts with a plane drawn as a line on screen           */
+/* ------------------------------------------------------------------ */
+
+let knifeMode = 'split';
+
+// Cut one mesh's geometry with a plane (in the mesh's own space).
+// Returns null if the plane misses it, else { geoms: [front, back] or [all], capInfo, backTris }.
+function sliceGeometry(rec, planeLocal, mode, fill) {
+  const g = rec.mesh.geometry;
+  const pos = g.getAttribute('position');
+  const vc = pos.count, tc = triCountOf(g), tv = triVerts(g);
+  const triMat = recTriMaterials(rec);
+  const names = Object.keys(g.attributes);
+  const attrs = names.map((n) => g.attributes[n]);
+  // working copy of every attribute as plain numbers (new cut vertices get appended)
+  // (quantized / normalized attributes — common in GLB — are converted back to real values)
+  const data = attrs.map((a) => {
+    const arr = a.isInterleavedBufferAttribute ? a.data.array : a.array;
+    const out = new Array(vc * a.itemSize);
+    for (let i = 0; i < vc; i++) for (let k = 0; k < a.itemSize; k++) {
+      const v = a.getComponent(i, k);
+      out[i * a.itemSize + k] = a.normalized ? THREE.MathUtils.denormalize(v, arr) : v;
+    }
+    return out;
+  });
+  const tol = tolOf(g);
+  const raw = new Float64Array(vc);
+  for (let i = 0; i < vc; i++) raw[i] = planeLocal.distanceToPoint(new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i)));
+  // A cut exactly through a row of vertices makes paper-thin slivers. Nudge it by a tiny, invisible
+  // amount (≤ 0.4% of the part's size) so no vertex sits on it.
+  g.computeBoundingBox();
+  const size = g.boundingBox.getSize(new THREE.Vector3()).length() || 1;
+  let shift = 0;
+  for (const f of [0, 1, -1, 2.3, -2.3, 3.7, -3.7]) {
+    const sft = f * 1e-3 * size;
+    let ok = true;
+    for (let i = 0; i < vc && ok; i++) if (Math.abs(raw[i] + sft) < tol * 50) ok = false;
+    if (ok) { shift = sft; break; }
+  }
+  planeLocal = planeLocal.clone();
+  planeLocal.constant += shift;
+  const dist = new Float64Array(vc);
+  let pos0 = 0, neg0 = 0;
+  for (let i = 0; i < vc; i++) {
+    let d = raw[i] + shift;
+    if (Math.abs(d) < tol) d = tol; // last resort: points on the plane count as "front"
+    dist[i] = d;
+    if (d > 0) pos0++; else neg0++;
+  }
+  if (!pos0 || !neg0) return null;
+  let next = vc;
+  const edgeVert = new Map();
+  const cutVertex = (a, b) => {
+    const key = a < b ? a * (vc + 1) + b : b * (vc + 1) + a;
+    let v = edgeVert.get(key);
+    if (v !== undefined) return v;
+    const t = dist[a] / (dist[a] - dist[b]);
+    names.forEach((n, ai) => {
+      const it = attrs[ai].itemSize, arr = data[ai];
+      for (let k = 0; k < it; k++) arr.push(arr[a * it + k] + (arr[b * it + k] - arr[a * it + k]) * t);
+      if (n === 'normal') { const o = arr.length - 3; const l = Math.hypot(arr[o], arr[o + 1], arr[o + 2]) || 1; arr[o] /= l; arr[o + 1] /= l; arr[o + 2] /= l; }
+    });
+    v = next++;
+    edgeVert.set(key, v);
+    return v;
+  };
+  const front = [], back = []; // [a, b, c, material, wasCut]
+  const segments = [];         // cut edges [v1, v2] for filling
+  for (let t = 0; t < tc; t++) {
+    const v = [tv(t, 0), tv(t, 1), tv(t, 2)], m = triMat[t];
+    const s = v.map((i) => dist[i] > 0);
+    if (s[0] === s[1] && s[1] === s[2]) { (s[0] ? front : back).push([v[0], v[1], v[2], m]); continue; }
+    // the vertex alone on its side, then the other two in winding order
+    const li = s[0] !== s[1] && s[0] !== s[2] ? 0 : s[1] !== s[0] && s[1] !== s[2] ? 1 : 2;
+    const L = v[li], P = v[(li + 1) % 3], Q = v[(li + 2) % 3];
+    const i1 = cutVertex(L, P), i2 = cutVertex(L, Q);
+    const lone = s[li] ? front : back, pair = s[li] ? back : front;
+    lone.push([L, i1, i2, m]);
+    pair.push([i1, P, Q, m], [i1, Q, i2, m]);
+    segments.push([i1, i2]);
+  }
+
+  // ---- fill the opening: link cut edges into loops and triangulate them in the plane ----
+  const caps = []; // [a, b, c] in the new vertex numbering, facing +normal (for the back piece)
+  let openLoops = 0;
+  if (fill && mode === 'split' && segments.length) {
+    const n = planeLocal.normal.clone().normalize();
+    const u = new THREE.Vector3(1, 0, 0);
+    if (Math.abs(n.x) > 0.9) u.set(0, 1, 0);
+    u.sub(n.clone().multiplyScalar(u.dot(n))).normalize();
+    const w = new THREE.Vector3().crossVectors(n, u); // u × w = n
+    const P = data[names.indexOf('position')];
+    const key = (i) => `${Math.round(P[i * 3] / tol)}_${Math.round(P[i * 3 + 1] / tol)}_${Math.round(P[i * 3 + 2] / tol)}`;
+    const adj = new Map();
+    const link = (a, b) => { if (!adj.has(a)) adj.set(a, []); adj.get(a).push(b); };
+    const rep = new Map(); // weld key -> one vertex
+    for (const [a, b] of segments) {
+      const ka = key(a), kb = key(b);
+      if (ka === kb) continue;
+      if (!rep.has(ka)) rep.set(ka, a); if (!rep.has(kb)) rep.set(kb, b);
+      link(ka, kb); link(kb, ka);
+    }
+    const seen = new Set();
+    const loops = [];
+    for (const start of adj.keys()) {
+      if (seen.has(start)) continue;
+      const loop = [start];
+      seen.add(start);
+      let prev = null, cur = start, closed = false;
+      for (let guard = 0; guard < 1e6; guard++) {
+        const nb = (adj.get(cur) || []).filter((x) => x !== prev);
+        const nxt = nb.find((x) => x === start && loop.length > 2) || nb.find((x) => !seen.has(x));
+        if (nxt === undefined) break;
+        if (nxt === start) { closed = true; break; }
+        seen.add(nxt); loop.push(nxt); prev = cur; cur = nxt;
+      }
+      if (closed && loop.length >= 3) loops.push(loop); else openLoops++;
+    }
+    // 2-D outlines; nested outlines become holes (odd depth)
+    const p2 = (k) => { const i = rep.get(k); const p = new THREE.Vector3(P[i * 3], P[i * 3 + 1], P[i * 3 + 2]); return new THREE.Vector2(p.dot(u), p.dot(w)); };
+    const polys = loops.map((l) => ({ keys: l, pts: l.map(p2) }));
+    const inside = (pt, poly) => { let c = false; for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) { const a = poly[i], b = poly[j]; if ((a.y > pt.y) !== (b.y > pt.y) && pt.x < (b.x - a.x) * (pt.y - a.y) / (b.y - a.y) + a.x) c = !c; } return c; };
+    const area = (pts) => Math.abs(THREE.ShapeUtils.area(pts));
+    polys.sort((a, b) => area(b.pts) - area(a.pts));
+    polys.forEach((pl, i) => {
+      pl.depth = 0; pl.parent = null;
+      for (let j = i - 1; j >= 0; j--) if (inside(pl.pts[0], polys[j].pts)) { pl.depth = polys[j].depth + 1; pl.parent = polys[j]; break; }
+    });
+    const capVerts = []; // new vertices for the cap (own normal & uv)
+    let minU = Infinity, minW = Infinity, span = 0;
+    polys.forEach((pl) => pl.pts.forEach((q) => { minU = Math.min(minU, q.x); minW = Math.min(minW, q.y); }));
+    polys.forEach((pl) => pl.pts.forEach((q) => { span = Math.max(span, q.x - minU, q.y - minW); }));
+    span = span || 1;
+    for (const outer of polys.filter((pl) => pl.depth % 2 === 0)) {
+      const holes = polys.filter((pl) => pl.parent === outer && pl.depth % 2 === 1);
+      const contour = outer.pts.slice(), holePts = holes.map((h) => h.pts.slice());
+      let tris;
+      try { tris = THREE.ShapeUtils.triangulateShape(contour, holePts); } catch (e) { continue; }
+      const all = contour.concat(...holePts);
+      const base = capVerts.length;
+      all.forEach((q) => capVerts.push(q));
+      for (const [a, b, c] of tris) {
+        const A = all[a], B = all[b], C = all[c];
+        const ccw = (B.x - A.x) * (C.y - A.y) - (B.y - A.y) * (C.x - A.x) > 0; // ccw in (u,w) faces +n
+        caps.push(ccw ? [base + a, base + b, base + c] : [base + a, base + c, base + b]);
+      }
+    }
+    // append cap vertices: position on the plane, normal ±n (set per piece later), planar uv
+    caps.vertexStart = next;
+    caps.count = capVerts.length;
+    for (const q of capVerts) {
+      const p = u.clone().multiplyScalar(q.x).add(w.clone().multiplyScalar(q.y)).add(n.clone().multiplyScalar(-planeLocal.constant));
+      names.forEach((nm, ai) => {
+        const it = attrs[ai].itemSize, arr = data[ai];
+        if (nm === 'position') arr.push(p.x, p.y, p.z);
+        else if (nm === 'normal') arr.push(n.x, n.y, n.z);
+        else if (/^uv/.test(nm)) arr.push((q.x - minU) / span, (q.y - minW) / span);
+        else for (let k = 0; k < it; k++) arr.push(nm === 'color' || k === 3 ? 1 : 0);
+      });
+      next++;
+    }
+    caps.n = n;
+  }
+
+  // ---- build the output geometries ----
+  const mats = [].concat(rec.baseMaterial);
+  let capMat = -1;
+  if (caps.length) {
+    const cm = cloneMaterial(mats[0]);
+    const wasTextured = !!cm.map;
+    for (const k of MAP_KEYS) if (cm[k]) cm[k] = null;
+    if (wasTextured && cm.color) cm.color.set(0xbdb6ad); // a textured material's plain color is white — use a neutral grey
+    cm.name = 'cut_surface';
+    cm.side = THREE.FrontSide;
+    mats.push(cm);
+    capMat = mats.length - 1;
+  }
+  const build = (tris, capFlip) => {
+    const list = tris.slice();
+    if (capMat >= 0) for (const [a, b, c] of caps) list.push(capFlip ? [caps.vertexStart + a, caps.vertexStart + c, caps.vertexStart + b, capMat] : [caps.vertexStart + a, caps.vertexStart + b, caps.vertexStart + c, capMat]);
+    const used = new Map();
+    const order = list.map((t, i) => i).sort((x, y) => list[x][3] - list[y][3] || x - y);
+    const idx = [];
+    const groups = [];
+    for (const i of order) {
+      const t = list[i];
+      for (let k = 0; k < 3; k++) { if (!used.has(t[k])) used.set(t[k], used.size); idx.push(used.get(t[k])); }
+      const last = groups[groups.length - 1];
+      if (last && last.m === t[3]) last.count += 3; else groups.push({ start: idx.length - 3, count: 3, m: t[3] });
+    }
+    const geo = new THREE.BufferGeometry();
+    names.forEach((nm, ai) => {
+      const it = attrs[ai].itemSize, arr = data[ai];
+      const out = new Float32Array(used.size * it);
+      for (const [old, nw] of used) for (let k = 0; k < it; k++) out[nw * it + k] = arr[old * it + k];
+      geo.setAttribute(nm, new THREE.BufferAttribute(out, it));
+    });
+    // the cap faces outwards on each piece
+    if (capMat >= 0 && geo.getAttribute('normal') && capFlip) {
+      const nrm = geo.getAttribute('normal');
+      for (const [old, nw] of used) if (old >= caps.vertexStart) nrm.setXYZ(nw, -caps.n.x, -caps.n.y, -caps.n.z);
+    }
+    geo.setIndex(idx);
+    const usedMats = [...new Set(groups.map((gr) => gr.m))].sort((a, b) => a - b);
+    const mi = new Map(usedMats.map((m, i) => [m, i]));
+    if (usedMats.length > 1) groups.forEach((gr) => geo.addGroup(gr.start, gr.count, mi.get(gr.m)));
+    return { geo, mats: usedMats.map((m) => mats[m]), remap: used, order, list };
+  };
+  if (mode === 'cut') {
+    const all = build(front.concat(back), false);
+    // which output triangles came from the back side (to select them afterwards)
+    const backTris = [];
+    all.order.forEach((src, outI) => { if (src >= front.length) backTris.push(outI); });
+    return { geoms: [all], backTris, openLoops: 0 };
+  }
+  return { geoms: [build(front, true), build(back, false)], openLoops, capped: caps.length > 0 };
+}
+
+// World-space cutting plane from a line drawn on screen (two points in canvas pixels)
+function knifePlane(a, b) {
+  const rect = canvas.getBoundingClientRect();
+  const ray = (p) => {
+    const ndc = new THREE.Vector2((p[0] / rect.width) * 2 - 1, -(p[1] / rect.height) * 2 + 1);
+    raycaster.setFromCamera(ndc, activeCam);
+    return raycaster.ray.clone();
+  };
+  const r1 = ray(a), r2 = ray(b);
+  // the plane holds both rays: it goes "straight back" through the scene along the view
+  const p1 = r1.origin.clone().add(r1.direction.clone().multiplyScalar(1));
+  const p2 = r2.origin.clone().add(r2.direction.clone().multiplyScalar(1));
+  const normal = new THREE.Vector3().subVectors(p2, p1).cross(r1.direction).normalize();
+  if (!isFinite(normal.x) || normal.lengthSq() < 0.5) return null;
+  return new THREE.Plane().setFromNormalAndCoplanarPoint(normal, p1);
+}
+
+// The parts a knife line should cut: the selection, or whatever lies under the line
+function knifeTargets(a, b) {
+  if (state.scope) return scopeRecs().filter((r) => r.editable && r.mesh.visible);
+  const rect = canvas.getBoundingClientRect();
+  const hit = new Set();
+  const targets = state.meshes.filter((r) => r.editable && r.mesh.visible).map((r) => r.mesh);
+  for (let i = 0; i <= 48; i++) {
+    const t = i / 48, x = a[0] + (b[0] - a[0]) * t, y = a[1] + (b[1] - a[1]) * t;
+    raycaster.setFromCamera(new THREE.Vector2((x / rect.width) * 2 - 1, -(y / rect.height) * 2 + 1), activeCam);
+    for (const h of raycaster.intersectObjects(targets, false)) hit.add(h.object);
+  }
+  return state.meshes.filter((r) => hit.has(r.mesh));
+}
+
+function doKnife(a, b) {
+  if (!state.modelRoot) return toast('The scene is empty — add a shape or load a model first.', 'warn');
+  if (Math.hypot(b[0] - a[0], b[1] - a[1]) < 12) return; // a click, not a line
+  const plane = knifePlane(a, b);
+  if (!plane) return;
+  const recs = knifeTargets(a, b);
+  if (!recs.length) {
+    return toast(state.scope ? 'The selection can’t be cut (animated, instanced or point geometry).' : 'The line didn’t cross any part — drag it across the model.', 'info', 4000);
+  }
+  const mode = knifeMode, fill = $('knife-fill').checked;
+  setLoading(true, 'Cutting…');
+  setTimeout(() => {
+    try {
+      let cut = 0, open = 0, parts = 0, lastObject = null, cutRec = null, backTris = null;
+      for (const rec of recs) {
+        rec.mesh.updateWorldMatrix(true, false);
+        const local = plane.clone().applyMatrix4(rec.mesh.matrixWorld.clone().invert());
+        const res = sliceGeometry(rec, local, mode, fill);
+        if (!res) continue;
+        cut++;
+        open += res.openLoops || 0;
+        if (mode === 'cut') {
+          const out = res.geoms[0];
+          rec.mesh.geometry = out.geo; rec.baseline = out.geo; rec.pct = 100;
+          rec.baseMaterial = out.mats.length > 1 ? out.mats : out.mats[0];
+          cutRec = rec; backTris = res.backTris;
+          continue;
+        }
+        // split: replace the part with two new parts (kept together in one object)
+        const src = rec.mesh;
+        let parent = src.parent, wrapper = null;
+        if (parent === state.modelRoot) { wrapper = new THREE.Group(); wrapper.visible = src.visible; parent.add(wrapper); parent = wrapper; }
+        const newRecs = res.geoms.map((out, i) => {
+          const mats = out.mats.map((m) => cloneMaterial(m));
+          const m = new THREE.Mesh(out.geo, mats.length > 1 ? mats : mats[0]);
+          m.name = uniqueName(`${src.name}_${i ? 'B' : 'A'}`);
+          m.position.copy(src.position); m.quaternion.copy(src.quaternion); m.scale.copy(src.scale);
+          m.visible = wrapper ? true : src.visible;
+          centerGeometryPivot(m);
+          rememberOrigTransform(m);
+          parent.add(m);
+          return { mesh: m, baseMaterial: m.material, baseline: out.geo, pct: 100, editable: true, isPoints: false };
+        });
+        src.parent.remove(src);
+        if (wrapper) { wrapper.name = uniqueName(src.name); centerObjectPivot(wrapper); rememberOrigTransform(wrapper); }
+        state.meshes.splice(state.meshes.indexOf(rec), 1, ...newRecs);
+        parts += 2;
+        lastObject = topObjectOf(newRecs[0].mesh);
+      }
+      if (!cut) return toast('The cut missed — the line has to cross the part.', 'info', 3500);
+      setViewMode(state.viewMode);
+      if (mode === 'cut' && cutRec) {
+        setScope(cutRec.mesh);
+        setTool('faces');
+        setFaceSelection(cutRec, backTris, 'set');
+      } else {
+        setScope(cut === 1 ? lastObject : null);
+      }
+      refreshStats();
+      pushHistory();
+      if (mode === 'cut') {
+        toast(`Cut ${cut} part${cut > 1 ? 's' : ''} along your line. The faces on one side are selected — recolor them in Color &amp; Material, or press <b>Invert</b> for the other side.`, 'success', 7000);
+      } else {
+        toast(`Sliced into ${parts} parts — click one to move it away. ${fill ? (open ? `The cut couldn’t be completely filled because the model isn’t closed there (${open} open edge${open > 1 ? 's' : ''}).` : 'The cut was filled, so both sides are solid.') : ''} Ctrl+Z to undo.`, open ? 'warn' : 'success', 7000);
+      }
+    } catch (e) {
+      console.error('[Online3D] knife failed:', e);
+      toast('The cut failed: ' + escapeHTML(e.message || String(e)), 'error');
+    } finally {
+      setLoading(false);
+    }
+  }, 20);
+}
+
+// ---- drawing the knife line ----
+let knifeDrag = null;
+function knifeSvgUpdate() {
+  const svg = $('knife-svg');
+  if (!knifeDrag) { svg.classList.add('hidden'); return; }
+  svg.classList.remove('hidden');
+  const [a, b] = [knifeDrag.a, knifeDrag.b];
+  const L = $('knife-line');
+  L.setAttribute('x1', a[0]); L.setAttribute('y1', a[1]); L.setAttribute('x2', b[0]); L.setAttribute('y2', b[1]);
+  $('knife-dot-a').setAttribute('cx', a[0]); $('knife-dot-a').setAttribute('cy', a[1]);
+  $('knife-dot-b').setAttribute('cx', b[0]); $('knife-dot-b').setAttribute('cy', b[1]);
+}
+const canvasPt = (e) => { const r = canvas.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+canvas.addEventListener('pointerdown', (e) => {
+  if (state.tool !== 'knife' || e.button !== 0 || !e.isPrimary) return;
+  e.stopImmediatePropagation(); // don't orbit while drawing the line
+  e.preventDefault();
+  canvas.setPointerCapture(e.pointerId);
+  const p = canvasPt(e);
+  controls.enabled = false; // belt and braces: the camera must not move while drawing
+  knifeDrag = { id: e.pointerId, a: p, b: p };
+  knifeSvgUpdate();
+}, true);
+canvas.addEventListener('pointermove', (e) => {
+  if (!knifeDrag || e.pointerId !== knifeDrag.id) return;
+  let p = canvasPt(e);
+  if (e.shiftKey) { // Shift: snap to 15° steps
+    const dx = p[0] - knifeDrag.a[0], dy = p[1] - knifeDrag.a[1], len = Math.hypot(dx, dy), ang = Math.round(Math.atan2(dy, dx) / (Math.PI / 12)) * (Math.PI / 12);
+    p = [knifeDrag.a[0] + Math.cos(ang) * len, knifeDrag.a[1] + Math.sin(ang) * len];
+  }
+  knifeDrag.b = p;
+  knifeSvgUpdate();
+});
+const endKnife = (e) => {
+  if (!knifeDrag || e.pointerId !== knifeDrag.id) return;
+  const { a, b } = knifeDrag;
+  knifeDrag = null;
+  controls.enabled = true;
+  knifeSvgUpdate();
+  if (e.type === 'pointerup') doKnife(a, b);
+};
+canvas.addEventListener('pointerup', endKnife);
+canvas.addEventListener('pointercancel', endKnife);
+
+function updateKnifePanel() {
+  $('knife-panel').classList.toggle('hidden', state.tool !== 'knife');
+  document.querySelectorAll('.knife-mode-btn').forEach((b) => {
+    const on = b.dataset.kmode === knifeMode;
+    b.classList.toggle('bg-tertiary-container/40', on);
+    b.classList.toggle('text-tertiary', on);
+    b.classList.toggle('text-on-surface-variant', !on);
+  });
+  $('knife-fill-row').classList.toggle('opacity-40', knifeMode !== 'split');
+  $('knife-fill').disabled = knifeMode !== 'split';
+  $('knife-target').textContent = state.scope ? `Cuts: ${state.scope.name || 'the selection'}` : 'Cuts: whatever is under the line';
+  canvas.style.cursor = state.tool === 'knife' ? 'crosshair' : '';
+}
+
+/* ------------------------------------------------------------------ */
 /* Textures & images                                                   */
 /* ------------------------------------------------------------------ */
 
@@ -3960,6 +4348,7 @@ $('face-grow').addEventListener('click', faceGrow);
 $('face-all').addEventListener('click', () => faceAll(false));
 $('face-invert').addEventListener('click', () => faceAll(true));
 $('face-clear').addEventListener('click', clearFaceSelection);
+document.querySelectorAll('.knife-mode-btn').forEach((b) => b.addEventListener('click', () => { knifeMode = b.dataset.kmode; updateKnifePanel(); }));
 // Add Shape menu
 const shapePop = $('shape-popover');
 $('btn-add-shape').addEventListener('click', (e) => { e.stopPropagation(); shapePop.classList.toggle('hidden'); });
@@ -4225,6 +4614,7 @@ window.addEventListener('keydown', (e) => {
   switch (e.key.toLowerCase()) {
     case 'v': setTool('select'); break;
     case 'p': setTool('faces'); break;
+    case 'k': setTool('knife'); break;
     case 'g': setTool('move'); break;
     case 'r': setTool('rotate'); break;
     case 's': setTool('scale'); break;
@@ -4235,6 +4625,8 @@ window.addEventListener('keydown', (e) => {
     case 'escape':
       if (!$('match-modal').classList.contains('hidden')) closeMatchPanel();
       else if (!$('shape-popover').classList.contains('hidden')) $('shape-popover').classList.add('hidden');
+      else if (knifeDrag) { knifeDrag = null; controls.enabled = true; knifeSvgUpdate(); }
+      else if (state.tool === 'knife') setTool('select');
       else if (state.tool === 'faces') { if (faceActive()) clearFaceSelection(); else setTool('select'); }
       else if (document.body.classList.contains('preview-mode')) setPreview(false);
       else if (state.scope) {
@@ -4437,6 +4829,7 @@ syncPolySliderUI();
 updatePresetChips();
 updatePartButtons();
 updateFacePanel();
+updateKnifePanel();
 applyLayout();
 updateMobileInfo();
 updateDownloadLabel();
@@ -4455,6 +4848,7 @@ window.aether3d = {
   setViewMode,
   setTool,
   camera: () => activeCam,
+  controls: () => controls,
   version: APP_VERSION,
   three: THREE.REVISION,
 };
