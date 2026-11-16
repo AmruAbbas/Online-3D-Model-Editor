@@ -33,7 +33,7 @@ import { unzipSync, zipSync, strToU8, strFromU8 } from 'three/addons/libs/fflate
 
 // App version — shown in the header. Rules: +0.1 for a small feature update, +1 for a revamp or
 // major feature update, and a letter suffix (b, c, d…) for bug-fix-only releases of the same version.
-const APP_VERSION = 'v2.0b';
+const APP_VERSION = 'v2.1';
 
 const THREE_CDN = 'https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/';
 const GH_MODELS = 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r170/examples/models/';
@@ -365,7 +365,7 @@ const BROWSER_CANT_SHOW = new Set(['tif', 'tiff', 'psd', 'dds', 'exr', 'hdr']);
 const baseKey = (s) => { try { s = decodeURIComponent(s); } catch (e) {} return s.split('?')[0].split('#')[0].split(/[\\/]/).pop().trim().toLowerCase(); };
 
 function newImportCtx(map) {
-  const ctx = { map, missing: new Set(), unsupported: new Set(), failed: new Set(), urlName: new Map(), started: false };
+  const ctx = { map, missing: new Set(), unsupported: new Set(), failed: new Set(), urlName: new Map(), used: new Set(), started: false };
   for (const [k, v] of map) { ctx.urlName.set(v.url, v.file.name); if (v.rawUrl) ctx.urlName.set(v.rawUrl, v.file.name); }
   ctx.done = new Promise((res) => { ctx.finish = res; });
   return ctx;
@@ -375,7 +375,7 @@ function newImportCtx(map) {
 function lookupFile(ctx, ref, opts = {}) {
   const key = baseKey(ref);
   const hit = ctx.map.get(key);
-  if (hit) return opts.raw && hit.rawUrl ? hit.rawUrl : hit.url;
+  if (hit) { ctx.used.add(key); return opts.raw && hit.rawUrl ? hit.rawUrl : hit.url; }
   if (key) (BROWSER_CANT_SHOW.has(extOf(key)) ? ctx.unsupported : ctx.missing).add(ref.split(/[\\/]/).pop());
   return null;
 }
@@ -457,7 +457,7 @@ function rewriteMTLTextures(text, ctx) {
     const name = toks.slice(i).join(' ');
     if (!name) return line;
     // try the whole name (spaces allowed), then just its last word (stray trailing junk)
-    const hit = lookupFile(ctx, name) || (toks.length - i > 1 ? (() => { const u = ctx.map.get(baseKey(toks[toks.length - 1])); if (u) { ctx.missing.delete(name.split(/[\\/]/).pop()); return u.url; } return null; })() : null);
+    const hit = lookupFile(ctx, name) || (toks.length - i > 1 ? (() => { const k = baseKey(toks[toks.length - 1]); const u = ctx.map.get(k); if (u) { ctx.missing.delete(name.split(/[\\/]/).pop()); ctx.used.add(k); return u.url; } return null; })() : null);
     return m[1] + (opts.length ? opts.join(' ') + ' ' : '') + (hit || name);
   }).join('\n');
 }
@@ -492,7 +492,14 @@ function defaultMaterial() {
 async function parseModel(file, ctx) {
   const ext = extOf(file.name);
   if (ext === 'obj') {
-    const text = await file.text();
+    let text = await file.text();
+    // Loose edges ("l") or points ("p") mixed into an object with faces make three's OBJLoader turn the
+    // WHOLE object into lines — the surface disappears. They can't be shown as surfaces anyway, so drop them.
+    if (/^\s*f\s/m.test(text)) {
+      let dropped = 0;
+      text = text.replace(/^[ \t]*[lp][ \t].*$/gm, () => { dropped++; return ''; });
+      ctx.droppedLines = dropped;
+    }
     const objLoader = new OBJLoader();
     const mtlFiles = pickMTLFiles(text, ctx.map, file.name);
     if (mtlFiles.length) {
@@ -651,28 +658,41 @@ async function handleFiles(fileList) {
   if (!files.length) return;
 
   // ---- 1) unpack and vet any .zip files ----
+  // Several zips may be dropped together (e.g. "model.zip" + "textures.zip"). Each must be a real,
+  // safe zip, and at least one file in the whole drop must be a 3D model.
   const zips = files.filter((f) => extOf(f.name) === 'zip');
   if (zips.length) {
-    if (zips.length > 1) return toast('Please drop one .zip at a time.', 'warn', 5000);
-    const zip = zips[0];
-    let unpacked;
-    try {
-      const bytes = new Uint8Array(await zip.arrayBuffer());
-      if (ascii(bytes, 0, 2) !== 'PK') throw new Error('it isn’t a zip file (wrong signature)');
-      unpacked = expandZip(zip, bytes);
-    } catch (e) {
-      return toast(`Rejected <b>${escapeHTML(zip.name)}</b>: ${escapeHTML(e.message)}. Nothing was loaded.`, 'error', 9000);
+    if (zips.length > 6) return toast('Please drop at most 6 .zip files at a time.', 'warn', 5000);
+    const unpackedAll = [];
+    const ignored = [];
+    let modelZip = null;
+    for (const zip of zips) {
+      let unpacked;
+      try {
+        const bytes = new Uint8Array(await zip.arrayBuffer());
+        if (ascii(bytes, 0, 2) !== 'PK') throw new Error('it isn’t a zip file (wrong signature)');
+        unpacked = expandZip(zip, bytes);
+      } catch (e) {
+        return toast(`Rejected <b>${escapeHTML(zip.name)}</b>: ${escapeHTML(e.message)}. Nothing was loaded.`, 'error', 9000);
+      }
+      if (!modelZip && unpacked.files.some((f) => SUPPORTED_EXT.includes(extOf(f.name)))) modelZip = zip;
+      unpackedAll.push(...unpacked.files);
+      ignored.push(...unpacked.ignored);
     }
-    const models = unpacked.files.filter((f) => SUPPORTED_EXT.includes(extOf(f.name)));
-    if (!models.length) {
-      const seen = unpacked.files.map((f) => f.name).concat(unpacked.ignored);
-      return toast(`Rejected <b>${escapeHTML(zip.name)}</b>: it contains no 3D model. A zip must include one of ${SUPPORTED_EXT.map((e) => '.' + e).join(', ')}${seen.length ? ` (found: ${escapeHTML(seen.slice(0, 8).join(', '))}${seen.length > 8 ? '…' : ''})` : ' (it’s empty)'}. Nothing was loaded.`, 'error', 11000);
+    const looseModels = files.some((f) => SUPPORTED_EXT.includes(extOf(f.name)));
+    if (!modelZip && !looseModels) {
+      const seen = unpackedAll.map((f) => f.name).concat(ignored);
+      const what = zips.length > 1 ? 'these zips contain' : 'it contains';
+      return toast(`Rejected <b>${escapeHTML(zips.map((z) => z.name).join(', '))}</b>: ${what} no 3D model. A zip must include one of ${SUPPORTED_EXT.map((e) => '.' + e).join(', ')}${seen.length ? ` (found: ${escapeHTML(seen.slice(0, 8).join(', '))}${seen.length > 8 ? '…' : ''})` : ' (it’s empty)'}. To add only pictures, use <b>Import Texture</b> in the Textures section. Nothing was loaded.`, 'error', 12000);
     }
-    if (unpacked.ignored.length) {
-      toast(`Ignored ${unpacked.ignored.length} unrelated file${unpacked.ignored.length > 1 ? 's' : ''} in the zip (${escapeHTML(unpacked.ignored.slice(0, 5).join(', '))}${unpacked.ignored.length > 5 ? '…' : ''}).`, 'info', 6000);
+    if (ignored.length) {
+      toast(`Ignored ${ignored.length} unrelated file${ignored.length > 1 ? 's' : ''} in the zip${zips.length > 1 ? 's' : ''} (${escapeHTML(ignored.slice(0, 5).join(', '))}${ignored.length > 5 ? '…' : ''}).`, 'info', 6000);
     }
-    files = files.filter((f) => f !== zip).concat(unpacked.files);
-    files.zipSource = zip;
+    // the same file name in two zips (e.g. a duplicate texture zip) — keep the first copy
+    const seenNames = new Set(files.filter((f) => extOf(f.name) !== 'zip').map((f) => f.name.toLowerCase()));
+    const merged = unpackedAll.filter((f) => { const k = f.name.toLowerCase(); if (seenNames.has(k)) return false; seenNames.add(k); return true; });
+    files = files.filter((f) => extOf(f.name) !== 'zip').concat(merged);
+    files.zipSource = modelZip || zips[0];
   }
 
   // ---- 2) pick the model and verify its contents match its extension ----
@@ -785,6 +805,7 @@ async function handleFiles(fileList) {
   setStatus('Loading…', true);
 
   let loaded = 0;
+  const loadedInfo = [];
   try {
     for (const model of models) {
       setLoading(true, models.length > 1 ? `Loading ${model.name} (${loaded + 1} of ${models.length})…` : `Loading ${model.name}…`);
@@ -795,10 +816,11 @@ async function handleFiles(fileList) {
         loaded++;
         const tris = recs.reduce((a, r) => a + meshTris(r), 0);
         if (models.length === 1) {
-          toast(`${wasEmpty ? 'Loaded' : 'Added'} <b>${escapeHTML(model.name)}</b> — ${fmtInt(tris)} triangles, ${recs.length} part${recs.length !== 1 ? 's' : ''}.${wasEmpty ? '' : ' It was placed beside what’s already in the scene; use <b>New Scene</b> to start over.'} Processed 100% locally; nothing was uploaded.`, 'success', 6000);
+          toast(`${wasEmpty ? 'Loaded' : 'Added'} <b>${escapeHTML(model.name)}</b> — ${fmtInt(tris)} triangles, ${recs.length} part${recs.length !== 1 ? 's' : ''}.${wasEmpty ? '' : ' It was placed beside what’s already in the scene; use <b>New Scene</b> to start over.'}${ctx.droppedLines ? ` Ignored ${ctx.droppedLines} loose edge/point line${ctx.droppedLines > 1 ? 's' : ''} (not part of any surface).` : ''} Processed 100% locally; nothing was uploaded.`, 'success', 6000);
         }
         // textures load in the background — report any that couldn't be used once they're done
-        waitForTextures(ctx).then(() => { reportTextureProblems(ctx, recs, model.name); collectModelTextures(); });
+        const wait = waitForTextures(ctx).then(() => { reportTextureProblems(ctx, recs, model.name); collectModelTextures(); });
+        loadedInfo.push({ name: model.name, recs, ctx, wait });
       } catch (err) {
         console.error('[Online3D] Load failed:', err);
         toast(`Failed to load <b>${escapeHTML(model.name)}</b>: ${escapeHTML((err && err.message) || String(err))}`, 'error', 9000);
@@ -811,6 +833,27 @@ async function handleFiles(fileList) {
     else { for (const u of freshURLs) { try { URL.revokeObjectURL(u); } catch (e) {} } setStatus('Error', false); }
   } finally {
     setLoading(false);
+  }
+  if (!loadedInfo.length) return;
+
+  // Pictures in the drop that no material asked for (e.g. an OBJ without its .mtl): add them to the
+  // texture library, then put them on the model by file name — or ask, when it isn't clear.
+  await Promise.all(loadedInfo.map((i) => i.wait));
+  const used = new Set(loadedInfo.flatMap((i) => [...i.ctx.used]));
+  const spare = files.filter((f) => IMAGE_EXT.includes(extOf(f.name)) && !used.has(f.name.toLowerCase()));
+  if (!spare.length) return;
+  setLoading(true, `Preparing ${spare.length} texture${spare.length > 1 ? 's' : ''}…`);
+  let added = [], notes = [];
+  try { ({ added, notes } = await importTextureFiles(spare)); } finally { setLoading(false); }
+  if (notes.length) toast(`Textures: ${notes.join('; ')}.`, 'info', 7000);
+  if (!added.length) return;
+  if (loadedInfo.length === 1) autoTextureModel(loadedInfo[0], added);
+  else {
+    // several models: each takes the sets whose name matches it
+    for (const info of loadedInfo) {
+      const mine = buildTextureSets(added).filter((st) => st.prefix && (materialSlots(info.recs).some((sl) => nameScore(st, sl) > 0) || alnum(info.name).includes(alnum(st.prefix))));
+      if (mine.length) autoTextureModel(info, mine.flatMap((st) => [...Object.values(st.maps), ...st.unknown]));
+    }
   }
 }
 
@@ -3120,13 +3163,53 @@ function makeThumb(img, w, h) {
 
 /* Validate and decode an image file. JPEG and WebP are converted to PNG (lossless from here on);
    very large images are scaled down to what the graphics card can handle. */
+// Largest texture side we keep: phones run out of memory with 4K/8K textures (an 8192² image needs
+// ~256 MB once decoded), so they get 2048; computers 4096.
+function textureLimit() {
+  const dev = (typeof isMobileLayout === 'function' && isMobileLayout()) || matchMedia('(pointer: coarse)').matches ? 2048 : 4096;
+  return Math.min(renderer.capabilities.maxTextureSize || 4096, dev);
+}
+
+// Width/height from a PNG / JPEG / WebP header, without decoding the image
+function imageSizeFromHeader(u8, kind) {
+  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  try {
+    if (kind === 'png') return { w: dv.getUint32(16), h: dv.getUint32(20) };
+    if (kind === 'webp') {
+      const fmt = ascii(u8, 12, 16);
+      if (fmt === 'VP8X') return { w: 1 + (u8[24] | u8[25] << 8 | u8[26] << 16), h: 1 + (u8[27] | u8[28] << 8 | u8[29] << 16) };
+      if (fmt === 'VP8L') { const b = dv.getUint32(21, true); return { w: 1 + (b & 0x3fff), h: 1 + ((b >> 14) & 0x3fff) }; }
+      if (fmt === 'VP8 ') return { w: dv.getUint16(26, true) & 0x3fff, h: dv.getUint16(28, true) & 0x3fff };
+    }
+    if (kind === 'jpeg') {
+      let i = 2;
+      while (i + 9 < u8.length) {
+        if (u8[i] !== 0xff) { i++; continue; }
+        const mk = u8[i + 1];
+        if (mk >= 0xc0 && mk <= 0xcf && mk !== 0xc4 && mk !== 0xc8 && mk !== 0xcc) return { w: dv.getUint16(i + 7), h: dv.getUint16(i + 5) };
+        i += 2 + dv.getUint16(i + 2);
+      }
+    }
+  } catch (e) {}
+  return null;
+}
+
 async function loadImageFile(file) {
-  const head = await readHead(file, 16);
+  const head = await readHead(file, 256 * 1024);
   const kind = sniffImage(head);
   if (!kind) throw new Error('it isn’t a PNG, JPEG or WebP image');
+  const max = textureLimit();
+  const size = imageSizeFromHeader(head, kind);
   let bmp;
-  try { bmp = await createImageBitmap(file); } catch (e) { throw new Error('the image data is damaged and can’t be decoded'); }
-  const max = Math.min(renderer.capabilities.maxTextureSize || 4096, 8192);
+  try {
+    // decode straight to the reduced size where the browser supports it (much less memory)
+    if (size && Math.max(size.w, size.h) > max) {
+      const k0 = max / Math.max(size.w, size.h);
+      try { bmp = await createImageBitmap(file, { resizeWidth: Math.round(size.w * k0), resizeHeight: Math.round(size.h * k0), resizeQuality: 'high' }); } catch (e) { bmp = null; }
+    }
+    if (!bmp) bmp = await createImageBitmap(file);
+  } catch (e) { throw new Error('the image data is damaged, or too large for this device to decode'); }
+  const origW = size ? size.w : bmp.width, origH = size ? size.h : bmp.height;
   const k = Math.min(1, max / Math.max(bmp.width, bmp.height));
   const w = Math.max(1, Math.round(bmp.width * k)), h = Math.max(1, Math.round(bmp.height * k));
   const c = document.createElement('canvas');
@@ -3143,13 +3226,227 @@ async function loadImageFile(file) {
     const d = sc.getContext('2d').getImageData(0, 0, sc.width, sc.height).data;
     for (let i = 3; i < d.length; i += 4) if (d[i] < 250) { hasAlpha = true; break; }
   }
-  const pngBlob = kind === 'png' && k === 1 ? file : await new Promise((r) => c.toBlob(r, 'image/png'));
+  const scaled = w < origW || h < origH;
+  const pngBlob = kind === 'png' && !scaled ? file : await new Promise((r) => c.toBlob(r, 'image/png'));
   if (!pngBlob) throw new Error('it couldn’t be converted to PNG');
   const url = URL.createObjectURL(pngBlob);
   const img = new Image();
   img.src = url;
   await img.decode();
-  return { img, url, w, h, hasAlpha, kind, scaled: k < 1, pngBlob };
+  return { img, url, w, h, origW, origH, hasAlpha, kind, scaled, pngBlob };
+}
+
+/* ---------- Texture sets: which picture is which, from the file name ----------
+   e.g. Male_cargo_1001_BaseColor.png, wood_normal.jpg, BasicColor.png, Spec.png. Used when a model
+   comes without a material file (.mtl) that says which texture goes where. */
+const TEX_TYPES = [
+  ['orm', ['occlusionroughnessmetallic', 'orm', 'arm']],
+  ['color', ['basecolor', 'basecolour', 'basiccolor', 'basiccolour', 'albedo', 'diffuse', 'diff', 'color', 'colour', 'col', 'bc', 'd']],
+  ['normal', ['normalopengl', 'normalgl', 'normaldirectx', 'normaldx', 'normalmap', 'normal', 'nrm', 'nor', 'norm', 'n']],
+  ['roughness', ['roughness', 'rough', 'rgh']],
+  ['metallic', ['metallic', 'metalness', 'metal']],
+  ['ao', ['ambientocclusion', 'occlusion', 'ao']],
+  ['emissive', ['emissive', 'emission', 'emit', 'glow', 'illumination']],
+  ['opacity', ['opacity', 'alpha', 'transparency']],
+  ['spec', ['specular', 'spec', 'spc']],
+  ['gloss', ['glossiness', 'gloss']],
+  ['height', ['height', 'displacement', 'disp', 'bump']],
+];
+const TEX_LABEL = { orm: 'AO/rough/metal', color: 'color', normal: 'normal', roughness: 'roughness', metallic: 'metallic', ao: 'AO', emissive: 'emissive', opacity: 'opacity', spec: 'specular→roughness', gloss: 'gloss→roughness', height: 'height (unused)' };
+
+function classifyTexture(name) {
+  const toks = String(name).replace(/([a-z])([A-Z])/g, '$1_$2').toLowerCase().split(/[\s_\-.]+/).filter(Boolean);
+  for (let n = Math.min(3, toks.length); n >= 1; n--) {
+    const tail = toks.slice(-n).join('');
+    for (const [type, words] of TEX_TYPES) {
+      if (!words.includes(tail)) continue;
+      if (tail.length <= 2 && toks.length - n < 1) continue; // "d", "n", "bc"… only as an ending of a longer name
+      return { type, prefix: toks.slice(0, -n).join('_'), directx: /directx|dx$/.test(tail) };
+    }
+  }
+  return { type: null, prefix: toks.join('_') };
+}
+
+// Group library entries into sets that share a name prefix
+function buildTextureSets(entries) {
+  const sets = new Map();
+  for (const e of entries) {
+    const c = classifyTexture(e.name);
+    let set = sets.get(c.prefix);
+    if (!set) { set = { prefix: c.prefix, maps: {}, unknown: [], directx: false }; sets.set(c.prefix, set); }
+    if (c.type && !set.maps[c.type]) { set.maps[c.type] = e; if (c.directx) set.directx = true; }
+    else set.unknown.push(e);
+  }
+  const out = [...sets.values()];
+  for (const st of out) if (!st.maps.color && st.unknown.length === 1) st.maps.color = st.unknown.shift(); // a lone picture is the colors
+  // sets with nothing usable are dropped
+  return out.filter((st) => Object.keys(st.maps).some((t) => t !== 'height'));
+}
+const setLabel = (st) => `${st.prefix || 'textures'} (${Object.keys(st.maps).map((t) => TEX_LABEL[t]).join(', ')})`;
+
+// Specular / gloss maps → roughness (the app's materials use roughness): roughness = 1 − value
+const invertedCache = new Map();
+function invertedTexture(e) {
+  if (invertedCache.has(e.id)) return invertedCache.get(e.id).clone();
+  const img = e.texture.image;
+  const c = document.createElement('canvas');
+  c.width = img.width; c.height = img.height;
+  const g = c.getContext('2d');
+  g.drawImage(img, 0, 0);
+  const d = g.getImageData(0, 0, c.width, c.height);
+  for (let i = 0; i < d.data.length; i += 4) {
+    const v = 255 - Math.round((d.data[i] + d.data[i + 1] + d.data[i + 2]) / 3);
+    d.data[i] = d.data[i + 1] = d.data[i + 2] = v; d.data[i + 3] = 255;
+  }
+  g.putImageData(d, 0, 0);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.NoColorSpace;
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  invertedCache.set(e.id, t);
+  return t.clone();
+}
+
+function applySetToMaterial(m, st, flipNormal) {
+  if (!m) return;
+  const tex = (e, srgb) => { const t = e.texture.clone(); t.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace; t.needsUpdate = true; return t; };
+  const M = st.maps;
+  if (M.color) { m.map = tex(M.color, true); if (m.color) m.color.set(0xffffff); if (M.color.hasAlpha && !M.opacity) { m.transparent = true; m.alphaTest = 0.02; } }
+  if (M.orm) { const t = tex(M.orm, false); m.aoMap = t; m.roughnessMap = t; m.metalnessMap = t; m.roughness = 1; m.metalness = 1; }
+  if (M.roughness) { m.roughnessMap = tex(M.roughness, false); m.roughness = 1; }
+  else if (M.gloss) { m.roughnessMap = invertedTexture(M.gloss); m.roughness = 1; }
+  else if (M.spec) { m.roughnessMap = invertedTexture(M.spec); m.roughness = 1; }
+  if (M.metallic) { m.metalnessMap = tex(M.metallic, false); m.metalness = 1; }
+  if (M.normal) { m.normalMap = tex(M.normal, false); m.normalScale = new THREE.Vector2(1, (flipNormal || st.directx) ? -1 : 1); }
+  if (M.ao && !M.orm) m.aoMap = tex(M.ao, false);
+  if (M.emissive) { m.emissiveMap = tex(M.emissive, true); if (m.emissive) m.emissive.set(0xffffff); m.emissiveIntensity = 1; }
+  if (M.opacity) { m.alphaMap = tex(M.opacity, false); m.transparent = true; }
+  m.needsUpdate = true;
+}
+
+// Material "slots" of a set of parts: each distinct material, with a readable name
+function materialSlots(recs) {
+  const slots = new Map();
+  for (const r of recs) {
+    if (r.isPoints) continue;
+    for (const m of [].concat(r.baseMaterial)) {
+      if (!m) continue;
+      if (!slots.has(m)) slots.set(m, { mat: m, name: m.name || r.mesh.name || 'material', parts: new Set() });
+      slots.get(m).parts.add(r.mesh.name);
+    }
+  }
+  return [...slots.values()];
+}
+
+const alnum = (x) => String(x || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+function nameScore(set, slot) {
+  const p = alnum(set.prefix);
+  if (!p) return 0;
+  for (const n of [slot.name, ...slot.parts]) {
+    const a = alnum(n);
+    if (!a) continue;
+    if (a === p) return 3;
+    if (a.includes(p) || p.includes(a)) return 2;
+  }
+  return 0;
+}
+
+// Decide which set goes on which material. Returns { assign: Map(slot → set), unresolved }
+function matchSetsToSlots(slots, sets) {
+  const assign = new Map();
+  const open = slots.filter((s) => !s.mat.map);
+  const anyTextured = open.length < slots.length;
+  if (!open.length || !sets.length) return { assign, unresolved: false };
+  if (sets.length === 1 && !anyTextured) { open.forEach((s) => assign.set(s, sets[0])); return { assign, unresolved: false }; }
+  for (const sl of open) {
+    let best = null, bestScore = 0;
+    for (const st of sets) { const sc = nameScore(st, sl); if (sc > bestScore) { best = st; bestScore = sc; } }
+    if (best) assign.set(sl, best);
+  }
+  return { assign, unresolved: assign.size < open.length };
+}
+
+function finishTextureAssignment() {
+  setViewMode(state.viewMode);
+  syncMaterialSliders();
+  syncTextureControls();
+  renderTexLibrary();
+}
+
+// After a model loads: put textures no material asked for onto it (by file name), or ask the user
+function autoTextureModel(info, entries) {
+  const sets = buildTextureSets(entries);
+  if (!sets.length) return;
+  const slots = materialSlots(info.recs);
+  const { assign, unresolved } = matchSetsToSlots(slots, sets);
+  if (unresolved) return openMatchPanel(slots, sets, assign, info.name, { replaceSnapshot: true });
+  if (!assign.size) return;
+  for (const [sl, st] of assign) applySetToMaterial(sl.mat, st, false);
+  finishTextureAssignment();
+  if (state.hIndex >= 0) state.history[state.hIndex] = historySnapshot(); // part of the import, not a separate undo step
+  const used = [...new Set(assign.values())];
+  toast(`<b>${escapeHTML(info.name)}</b> came without a material file, so its textures were matched by file name: ${used.map((st) => escapeHTML(setLabel(st))).join('; ')}. Looks wrong? Use <b>Match textures…</b> in the Textures section. If bumps look inside-out, use <b>Flip normal map</b>.`, 'success', 11000);
+}
+
+// ---- Match Textures panel ----
+let matchState = null;
+function openMatchPanel(slots, sets, prefill, title, opts = {}) {
+  if (!slots.length) return toast('Nothing selected that can take a texture.', 'warn', 3500);
+  if (!sets.length) return toast('No textures to match — import some first (Import Texture accepts images or a .zip of images).', 'warn', 5000);
+  matchState = { slots, sets, opts };
+  $('match-title').textContent = title || 'your model';
+  const rows = $('match-rows');
+  rows.innerHTML = '';
+  slots.forEach((sl, i) => {
+    const row = document.createElement('label');
+    row.className = 'flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2 p-2 rounded-lg bg-surface-container-lowest';
+    const pre = prefill && prefill.get(sl);
+    const parts = [...sl.parts];
+    row.innerHTML = `<span class="flex-1 min-w-0"><span class="block font-body-sm text-body-sm text-on-surface truncate">${escapeHTML(sl.name)}</span><span class="block font-label-sm text-[10px] text-outline truncate">${sl.mat.map ? 'already textured · ' : ''}${parts.length} part${parts.length !== 1 ? 's' : ''}: ${escapeHTML(parts.slice(0, 3).join(', '))}${parts.length > 3 ? '…' : ''}</span></span>` +
+      `<select class="match-select w-full sm:w-64 bg-surface-container text-on-surface rounded-lg px-2 py-1.5 font-body-sm text-body-sm ring-1 ring-white/10" data-i="${i}"><option value="">— leave as is —</option>${sets.map((st, k) => `<option value="${k}" ${pre === st ? 'selected' : ''}>${escapeHTML(setLabel(st))}</option>`).join('')}</select>`;
+    rows.appendChild(row);
+  });
+  $('match-flip').checked = false;
+  $('match-modal').classList.remove('hidden');
+}
+function closeMatchPanel() { $('match-modal').classList.add('hidden'); matchState = null; }
+function applyMatchPanel() {
+  if (!matchState) return;
+  let n = 0;
+  document.querySelectorAll('.match-select').forEach((sel) => {
+    if (sel.value === '') return;
+    applySetToMaterial(matchState.slots[Number(sel.dataset.i)].mat, matchState.sets[Number(sel.value)], $('match-flip').checked);
+    n++;
+  });
+  const { opts } = matchState;
+  closeMatchPanel();
+  if (!n) return;
+  finishTextureAssignment();
+  if (opts.replaceSnapshot && state.hIndex >= 0) state.history[state.hIndex] = historySnapshot(); else pushHistory();
+  toast(`Textures applied to ${n} material${n !== 1 ? 's' : ''}.`, 'success', 3500);
+}
+function openMatchForSelection() {
+  if (!state.modelRoot) return toast('The scene is empty — add a shape or load a model first.', 'warn');
+  const recs = faceActive() ? [state.faceSel.rec] : scopeRecs();
+  const slots = materialSlots(recs);
+  const sets = buildTextureSets(texLib);
+  // pre-fill with best guesses (by name, or the only set there is), even for already-textured materials
+  const guess = new Map();
+  for (const sl of slots) {
+    let best = sets.length === 1 ? sets[0] : null, bestScore = 0;
+    for (const st of sets) { const sc = nameScore(st, sl); if (sc > bestScore) { best = st; bestScore = sc; } }
+    if (best) guess.set(sl, best);
+  }
+  openMatchPanel(slots, sets, guess, scopeName());
+}
+
+// DirectX-style normal maps have the green channel the other way round: flip it
+function flipNormalMaps() {
+  if (!state.modelRoot) return;
+  let n = 0;
+  eachScopeMaterial((m) => { if (m.normalMap) { m.normalScale = (m.normalScale || new THREE.Vector2(1, 1)).clone(); m.normalScale.y *= -1; n++; } });
+  if (!n) return toast(`${escapeHTML(scopeName())} has no normal map to flip.`, 'info', 3000);
+  pushHistory();
+  toast('Normal map flipped — bumps and dents now face the other way.', 'success', 3000);
 }
 
 function newTexture(img, name) {
@@ -3167,7 +3464,7 @@ async function importTextureFiles(files) {
   const added = [], bad = [], notes = [];
   for (const f of files) {
     // the same file imported again re-uses its library entry
-    const key = `${f.name}|${f.size}|${f.lastModified}`;
+    const key = `${f.name.toLowerCase()}|${f.size}`; // files unpacked from a zip get a new date each time
     const dup = texLib.find((e) => e.key === key);
     if (dup) { added.push(dup); continue; }
     try {
@@ -3180,7 +3477,7 @@ async function importTextureFiles(files) {
       texLib.push(entry);
       added.push(entry);
       if (r.kind !== 'png') notes.push(`${escapeHTML(f.name)} → PNG`);
-      if (r.scaled) notes.push(`${escapeHTML(f.name)} scaled down to ${r.w}×${r.h}`);
+      if (r.scaled) notes.push(`${escapeHTML(f.name)} reduced from ${r.origW}×${r.origH} to ${r.w}×${r.h} for this device`);
     } catch (e) {
       bad.push(`<b>${escapeHTML(f.name)}</b> — ${escapeHTML(e.message)}`);
     }
@@ -3768,10 +4065,26 @@ $('btn-remove-texture').addEventListener('click', removeTextures);
 const texInput = $('texture-input'), imgInput = $('image-input');
 $('btn-import-texture').addEventListener('click', () => texInput.click());
 texInput.addEventListener('change', async () => {
-  const files = [...texInput.files];
+  let files = [...texInput.files];
   texInput.value = '';
   if (!files.length) return;
-  const { added, notes } = await importTextureFiles(files);
+  // a .zip of pictures: unpack it (same safety limits as model zips) and keep only the images
+  for (const zip of files.filter((f) => extOf(f.name) === 'zip')) {
+    try {
+      const bytes = new Uint8Array(await zip.arrayBuffer());
+      if (ascii(bytes, 0, 2) !== 'PK') throw new Error('it isn’t a zip file (wrong signature)');
+      const imgs = expandZip(zip, bytes).files.filter((f) => IMAGE_EXT.includes(extOf(f.name)));
+      if (!imgs.length) throw new Error('it contains no PNG, JPEG or WebP images');
+      files = files.concat(imgs);
+    } catch (e) {
+      toast(`Rejected <b>${escapeHTML(zip.name)}</b>: ${escapeHTML(e.message)}.`, 'error', 7000);
+    }
+  }
+  files = files.filter((f) => extOf(f.name) !== 'zip');
+  if (!files.length) return;
+  setLoading(true, `Importing ${files.length} texture${files.length > 1 ? 's' : ''}…`);
+  let added = [], notes = [];
+  try { ({ added, notes } = await importTextureFiles(files)); } finally { setLoading(false); }
   if (added.length) toast(`Imported ${added.length} texture${added.length > 1 ? 's' : ''}${notes.length ? ' (' + notes.join(', ') + ')' : ''}. Select a part and click a thumbnail to apply.`, 'success', 5000);
 });
 const pickImage = () => { $('shape-popover').classList.add('hidden'); imgInput.click(); };
@@ -3785,6 +4098,11 @@ imgInput.addEventListener('change', async () => {
   if (added.length) addImageToScene(added[0]);
 });
 $('btn-tex-apply').addEventListener('click', () => applyTexture(texActive));
+$('btn-match-textures').addEventListener('click', openMatchForSelection);
+$('btn-flip-normal').addEventListener('click', flipNormalMaps);
+$('match-apply').addEventListener('click', applyMatchPanel);
+$('match-cancel').addEventListener('click', closeMatchPanel);
+$('match-modal').addEventListener('click', (e) => { if (e.target.id === 'match-modal') closeMatchPanel(); });
 $('btn-tex-place').addEventListener('click', () => addImageToScene(texActive));
 $('btn-tex-download').addEventListener('click', () => downloadTexturePNG(texActive));
 $('btn-tex-remove').addEventListener('click', () => removeTextureEntry(texActive));
@@ -3915,7 +4233,8 @@ window.addEventListener('keydown', (e) => {
     case 'delete':
     case 'backspace': e.preventDefault(); if (state.tool === 'faces') deleteSelectedFaces(); else opDelete(); break;
     case 'escape':
-      if (!$('shape-popover').classList.contains('hidden')) $('shape-popover').classList.add('hidden');
+      if (!$('match-modal').classList.contains('hidden')) closeMatchPanel();
+      else if (!$('shape-popover').classList.contains('hidden')) $('shape-popover').classList.add('hidden');
       else if (state.tool === 'faces') { if (faceActive()) clearFaceSelection(); else setTool('select'); }
       else if (document.body.classList.contains('preview-mode')) setPreview(false);
       else if (state.scope) {
