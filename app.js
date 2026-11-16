@@ -33,7 +33,7 @@ import { unzipSync, zipSync, strToU8, strFromU8 } from 'three/addons/libs/fflate
 
 // App version — shown in the header. Rules: +0.1 for a small feature update, +1 for a revamp or
 // major feature update, and a letter suffix (b, c, d…) for bug-fix-only releases of the same version.
-const APP_VERSION = 'v2.0b';
+const APP_VERSION = 'v2.0c';
 
 const THREE_CDN = 'https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/';
 const GH_MODELS = 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r170/examples/models/';
@@ -492,7 +492,14 @@ function defaultMaterial() {
 async function parseModel(file, ctx) {
   const ext = extOf(file.name);
   if (ext === 'obj') {
-    const text = await file.text();
+    let text = await file.text();
+    // Loose edges ("l") or points ("p") mixed into an object with faces make three's OBJLoader turn the
+    // WHOLE object into lines — the surface disappears. They can't be shown as surfaces anyway, so drop them.
+    if (/^\s*f\s/m.test(text)) {
+      let dropped = 0;
+      text = text.replace(/^[ \t]*[lp][ \t].*$/gm, () => { dropped++; return ''; });
+      ctx.droppedLines = dropped;
+    }
     const objLoader = new OBJLoader();
     const mtlFiles = pickMTLFiles(text, ctx.map, file.name);
     if (mtlFiles.length) {
@@ -795,7 +802,7 @@ async function handleFiles(fileList) {
         loaded++;
         const tris = recs.reduce((a, r) => a + meshTris(r), 0);
         if (models.length === 1) {
-          toast(`${wasEmpty ? 'Loaded' : 'Added'} <b>${escapeHTML(model.name)}</b> — ${fmtInt(tris)} triangles, ${recs.length} part${recs.length !== 1 ? 's' : ''}.${wasEmpty ? '' : ' It was placed beside what’s already in the scene; use <b>New Scene</b> to start over.'} Processed 100% locally; nothing was uploaded.`, 'success', 6000);
+          toast(`${wasEmpty ? 'Loaded' : 'Added'} <b>${escapeHTML(model.name)}</b> — ${fmtInt(tris)} triangles, ${recs.length} part${recs.length !== 1 ? 's' : ''}.${wasEmpty ? '' : ' It was placed beside what’s already in the scene; use <b>New Scene</b> to start over.'}${ctx.droppedLines ? ` Ignored ${ctx.droppedLines} loose edge/point line${ctx.droppedLines > 1 ? 's' : ''} (not part of any surface).` : ''} Processed 100% locally; nothing was uploaded.`, 'success', 6000);
         }
         // textures load in the background — report any that couldn't be used once they're done
         waitForTextures(ctx).then(() => { reportTextureProblems(ctx, recs, model.name); collectModelTextures(); });
