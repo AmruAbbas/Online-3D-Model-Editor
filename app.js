@@ -17,6 +17,8 @@ import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
 import { ColladaLoader } from 'three/addons/loaders/ColladaLoader.js';
 import { ThreeMFLoader } from 'three/addons/loaders/3MFLoader.js';
+import { TGALoader } from 'three/addons/loaders/TGALoader.js';
+import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
 import { OBJExporter } from 'three/addons/exporters/OBJExporter.js';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
@@ -31,7 +33,7 @@ import { unzipSync, zipSync, strToU8, strFromU8 } from 'three/addons/libs/fflate
 
 // App version — shown in the header. Rules: +0.1 for a small feature update, +1 for a revamp or
 // major feature update, and a letter suffix (b, c, d…) for bug-fix-only releases of the same version.
-const APP_VERSION = 'v1.3';
+const APP_VERSION = 'v2.0b';
 
 const THREE_CDN = 'https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/';
 const GH_MODELS = 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r170/examples/models/';
@@ -231,6 +233,8 @@ function updateCamButtons() {
   };
   setActive(p, state.camType === 'persp');
   setActive(o, state.camType === 'ortho');
+  const ml = $('mobile-camtoggle-label');
+  if (ml) ml.textContent = state.camType === 'persp' ? 'PERSP' : 'ORTHO';
 }
 
 // Transform gizmo
@@ -353,51 +357,148 @@ function setViewMode(mode) {
 /* Model loading pipeline                                              */
 /* ------------------------------------------------------------------ */
 
-function makeManager(map) {
+/* ---------- Texture lookup for imports ----------
+   Every import gets a context that records which texture files a model asked for but couldn't use,
+   so we can tell the user instead of silently showing white. */
+
+const BROWSER_CANT_SHOW = new Set(['tif', 'tiff', 'psd', 'dds', 'exr', 'hdr']);
+const baseKey = (s) => { try { s = decodeURIComponent(s); } catch (e) {} return s.split('?')[0].split('#')[0].split(/[\\/]/).pop().trim().toLowerCase(); };
+
+function newImportCtx(map) {
+  const ctx = { map, missing: new Set(), unsupported: new Set(), failed: new Set(), urlName: new Map(), started: false };
+  for (const [k, v] of map) { ctx.urlName.set(v.url, v.file.name); if (v.rawUrl) ctx.urlName.set(v.rawUrl, v.file.name); }
+  ctx.done = new Promise((res) => { ctx.finish = res; });
+  return ctx;
+}
+
+// Find a referenced texture/file among the dropped files (by file name, ignoring folders and case)
+function lookupFile(ctx, ref, opts = {}) {
+  const key = baseKey(ref);
+  const hit = ctx.map.get(key);
+  if (hit) return opts.raw && hit.rawUrl ? hit.rawUrl : hit.url;
+  if (key) (BROWSER_CANT_SHOW.has(extOf(key)) ? ctx.unsupported : ctx.missing).add(ref.split(/[\\/]/).pop());
+  return null;
+}
+
+function makeManager(ctx, opts = {}) {
   const m = new THREE.LoadingManager();
+  m.onStart = () => { ctx.started = true; };
+  m.onLoad = () => ctx.finish();
+  m.onError = (url) => { ctx.failed.add(ctx.urlName.get(url) || url.split(/[\\/]/).pop()); };
   m.setURLModifier((url) => {
-    try {
-      if (/^(data:|blob:)/i.test(url)) return url;
-      let clean = url.split('?')[0].split('#')[0];
-      clean = decodeURIComponent(clean.split(/[\\/]/).pop()).toLowerCase();
-      const hit = map.get(clean);
-      return hit ? hit.url : url;
-    } catch (e) { return url; }
+    if (/^(data:|blob:)/i.test(url)) return url;
+    return lookupFile(ctx, url, opts) || url;
   });
+  // TGA (common in FBX packs) — decoded by us; works for both external and embedded textures
+  m.addHandler(/\.tga$/i, new AnyImageTextureLoader(m));
   return m;
 }
 
-// Rewrite texture references in an MTL file to blob: URLs of dropped files
-function rewriteMTLTextures(text, map) {
+// Wait until a loader's textures have finished (or failed), with a time limit
+async function waitForTextures(ctx, ms = 20000) {
+  if (!ctx.started) await new Promise((r) => setTimeout(r, 300));
+  if (!ctx.started) return;
+  await Promise.race([ctx.done, new Promise((r) => setTimeout(r, ms))]);
+}
+
+// ---- image decoding that also understands TGA ----
+function canvasFromRGBA(data, w, h) {
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(data.buffer, data.byteOffset, w * h * 4), w, h), 0, 0);
+  return c;
+}
+async function decodeImageBytes(buf) {
+  const u8 = new Uint8Array(buf);
+  if (sniffImage(u8) || ascii(u8, 0, 3) === 'GIF' || ascii(u8, 0, 2) === 'BM') {
+    return await createImageBitmap(new Blob([u8]));
+  }
+  const t = new TGALoader().parse(buf); // throws on data it can't read
+  return canvasFromRGBA(t.data, t.width, t.height);
+}
+async function tgaFileToPNG(file) {
+  const img = await decodeImageBytes(await file.arrayBuffer());
+  const c = img instanceof HTMLCanvasElement ? img : (() => { const k = document.createElement('canvas'); k.width = img.width; k.height = img.height; k.getContext('2d').drawImage(img, 0, 0); return k; })();
+  return await new Promise((r) => c.toBlob(r, 'image/png'));
+}
+
+// A texture loader for loaders that hand us .tga files (FBX): accepts TGA or any browser image format
+class AnyImageTextureLoader extends THREE.Loader {
+  load(url, onLoad, onProgress, onError) {
+    const tex = new THREE.Texture();
+    const full = this.manager.resolveURL((this.path || '') + url);
+    this.manager.itemStart(full);
+    fetch(full).then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.arrayBuffer(); })
+      .then(decodeImageBytes)
+      .then((img) => { tex.image = img; tex.needsUpdate = true; if (onLoad) onLoad(tex); this.manager.itemEnd(full); })
+      .catch((e) => { if (onError) onError(e); this.manager.itemError(full); this.manager.itemEnd(full); });
+    return tex;
+  }
+}
+
+// MTL texture options and how many values each takes (everything after them is the file name)
+const MTL_OPT_ARGS = { '-blendu': 1, '-blendv': 1, '-bm': 1, '-boost': 1, '-cc': 1, '-clamp': 1, '-imfchan': 1, '-mm': 2, '-o': 3, '-s': 3, '-t': 3, '-texres': 1, '-type': 1 };
+
+// Point texture references in an MTL file at the dropped files. File names may contain spaces
+// and Windows/Mac folder paths; unknown ones are recorded as missing.
+function rewriteMTLTextures(text, ctx) {
   return text.split(/\r?\n/).map((line) => {
-    const m = line.match(/^(\s*(?:map_Ka|map_Kd|map_Ks|map_Ns|map_d|map_Ke|map_bump|bump|disp|decal|refl|norm)\s+)(.*)$/i);
+    const m = line.match(/^(\s*(?:map_Ka|map_Kd|map_Ks|map_Ns|map_d|map_Ke|map_bump|map_Bump|bump|disp|decal|refl|norm|map_Pr|map_Pm)\s+)(.*)$/i);
     if (!m) return line;
-    const out = m[2].trim().split(/\s+/).map((tok) => {
-      if (tok.startsWith('-')) return tok;
-      try {
-        const base = decodeURIComponent(tok.split(/[\\/]/).pop()).toLowerCase();
-        const hit = map.get(base);
-        return hit ? hit.url : tok;
-      } catch (e) { return tok; }
-    });
-    return m[1] + out.join(' ');
+    const toks = m[2].trim().split(/\s+/);
+    const opts = [];
+    let i = 0;
+    while (i < toks.length && MTL_OPT_ARGS[toks[i].toLowerCase()] !== undefined) {
+      let n = MTL_OPT_ARGS[toks[i].toLowerCase()];
+      opts.push(toks[i++]);
+      // -s / -o / -t take 1–3 numbers
+      while (n-- > 0 && i < toks.length && (/^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$/.test(toks[i]) || /^(on|off)$/i.test(toks[i]) || /^[rgbmlz]$/i.test(toks[i]))) opts.push(toks[i++]);
+    }
+    const name = toks.slice(i).join(' ');
+    if (!name) return line;
+    // try the whole name (spaces allowed), then just its last word (stray trailing junk)
+    const hit = lookupFile(ctx, name) || (toks.length - i > 1 ? (() => { const u = ctx.map.get(baseKey(toks[toks.length - 1])); if (u) { ctx.missing.delete(name.split(/[\\/]/).pop()); return u.url; } return null; })() : null);
+    return m[1] + (opts.length ? opts.join(' ') + ' ' : '') + (hit || name);
   }).join('\n');
+}
+
+// The .mtl file(s) an .obj names with "mtllib"; falls back sensibly when names don't match
+function pickMTLFiles(objText, map, objName) {
+  const mtls = [...map.values()].filter((v) => extOf(v.file.name) === 'mtl').map((v) => v.file);
+  if (!mtls.length) return [];
+  const byName = new Map(mtls.map((f) => [f.name.toLowerCase(), f]));
+  const picked = [];
+  for (const mm of objText.matchAll(/^\s*mtllib\s+(.+?)\s*$/gm)) {
+    const whole = baseKey(mm[1]);
+    if (byName.has(whole)) { picked.push(byName.get(whole)); continue; }
+    for (const part of mm[1].split(/\s+/)) { const f = byName.get(baseKey(part)); if (f) picked.push(f); }
+  }
+  if (picked.length) return [...new Set(picked)];
+  if (mtls.length === 1) return mtls;
+  const same = mtls.find((f) => baseNameOf(f.name).toLowerCase() === baseNameOf(objName).toLowerCase());
+  return same ? [same] : mtls; // several unnamed candidates: use them all (material names rarely clash)
+}
+
+let ktx2Loader = null;
+function getKTX2Loader() {
+  if (!ktx2Loader) ktx2Loader = new KTX2Loader().setTranscoderPath(THREE_CDN + 'libs/basis/').detectSupport(renderer);
+  return ktx2Loader;
 }
 
 function defaultMaterial() {
   return new THREE.MeshPhysicalMaterial({ color: 0xb9c0d4, metalness: 0.15, roughness: 0.55, envMapIntensity: 1.0 });
 }
 
-async function parseModel(file, map) {
+async function parseModel(file, ctx) {
   const ext = extOf(file.name);
   if (ext === 'obj') {
     const text = await file.text();
     const objLoader = new OBJLoader();
-    const mtlEntry = [...map.values()].find((v) => extOf(v.file.name) === 'mtl');
-    if (mtlEntry) {
+    const mtlFiles = pickMTLFiles(text, ctx.map, file.name);
+    if (mtlFiles.length) {
       try {
-        const mtlText = rewriteMTLTextures(await mtlEntry.file.text(), map);
-        const creator = new MTLLoader().parse(mtlText, '');
+        const mtlText = (await Promise.all(mtlFiles.map((f) => f.text()))).join('\n');
+        const creator = new MTLLoader(makeManager(ctx)).parse(rewriteMTLTextures(mtlText, ctx), '');
         creator.preload();
         objLoader.setMaterials(creator);
       } catch (e) { console.warn('[Online3D] MTL parsing failed — loading OBJ without materials:', e); }
@@ -406,13 +507,14 @@ async function parseModel(file, map) {
   }
   if (ext === 'fbx') {
     const buf = await file.arrayBuffer();
-    return new FBXLoader(makeManager(map)).parse(buf, '');
+    return new FBXLoader(makeManager(ctx)).parse(buf, '');
   }
   if (ext === 'glb' || ext === 'gltf') {
-    const loader = new GLTFLoader(makeManager(map));
+    const loader = new GLTFLoader(makeManager(ctx));
     const draco = new DRACOLoader();
     draco.setDecoderPath(THREE_CDN + 'libs/draco/gltf/');
     loader.setDRACOLoader(draco);
+    loader.setKTX2Loader(getKTX2Loader()); // compressed (Basis/KTX2) textures
     loader.setMeshoptDecoder(MeshoptDecoder);
     const data = ext === 'glb' ? await file.arrayBuffer() : await file.text();
     return await new Promise((resolve, reject) =>
@@ -437,13 +539,37 @@ async function parseModel(file, map) {
     return pts;
   }
   if (ext === 'dae') {
-    const collada = new ColladaLoader(makeManager(map)).parse(await file.text(), '');
+    // ColladaLoader decodes .tga itself, so it gets the original TGA bytes
+    const collada = new ColladaLoader(makeManager(ctx, { raw: true })).parse(await file.text(), '');
     return collada.scene;
   }
   if (ext === '3mf') {
-    return new ThreeMFLoader(makeManager(map)).parse(await file.arrayBuffer());
+    return new ThreeMFLoader(makeManager(ctx)).parse(await file.arrayBuffer());
   }
   throw new Error('Unsupported format: .' + ext);
+}
+
+// After loading: textures that ended up empty (unsupported formats some loaders skip quietly)
+const MAP_KEYS = ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap', 'aoMap', 'alphaMap', 'bumpMap'];
+function reportTextureProblems(ctx, recs, modelName) {
+  // loaders that skip a texture quietly (e.g. FBX with a .tif) leave an empty texture behind
+  if (!ctx.failed.size && !ctx.missing.size && !ctx.unsupported.size) for (const r of recs) for (const m of [].concat(r.baseMaterial)) for (const k of MAP_KEYS) {
+    const t = m && m[k];
+    if (t && t.isTexture && !t.isCompressedTexture && !t.isDataTexture && (!t.image || !(t.image.width || t.image.videoWidth))) {
+      const n = t.name || (m.name ? `${m.name} (${k})` : k);
+      if (![...ctx.missing, ...ctx.unsupported].some((x) => x.toLowerCase() === n.toLowerCase())) ctx.failed.add(n);
+    }
+  }
+  for (const n of [...ctx.failed]) if ([...ctx.missing, ...ctx.unsupported].some((x) => x.toLowerCase() === n.toLowerCase())) ctx.failed.delete(n);
+  const parts = [];
+  const list = (set) => escapeHTML([...set].slice(0, 6).join(', ')) + (set.size > 6 ? ` and ${set.size - 6} more` : '');
+  if (ctx.missing.size) parts.push(`<b>not included</b>: ${list(ctx.missing)}`);
+  if (ctx.unsupported.size) parts.push(`<b>a format browsers can’t display</b> (convert to PNG/JPEG): ${list(ctx.unsupported)}`);
+  if (ctx.failed.size) parts.push(`<b>couldn’t be read</b>: ${list(ctx.failed)}`);
+  if (parts.length) {
+    toast(`Some textures of <b>${escapeHTML(modelName)}</b> couldn’t be used, so those areas show plain color — ${parts.join('; ')}. Add the missing files to the zip (any folder is fine) and import again.`, 'warn', 14000);
+  }
+  return parts.length;
 }
 
 /* ---------- Checking files before anything is loaded ----------
@@ -565,44 +691,46 @@ async function handleFiles(fileList) {
     return;
   }
   const problems = [];
-  let verified = null;
-  for (const f of candidates) {
+  const valid = [];
+  for (const f of candidates.slice(0, 40)) {
     const why = await checkModelFile(f);
-    if (!why) { verified = f; break; }
-    problems.push(`<b>${escapeHTML(f.name)}</b> — ${why}`);
+    if (!why) valid.push(f); else problems.push(`<b>${escapeHTML(f.name)}</b> — ${why}`);
   }
-  if (candidates.length && !verified) {
+  if (candidates.length && !valid.length) {
     const src = files.zipSource ? `<b>${escapeHTML(files.zipSource.name)}</b> was rejected: ` : '';
     return toast(`${src}No valid 3D model found. ${problems.join('; ')}. Nothing was loaded.`, 'error', 11000);
   }
-  if (verified && candidates[0] !== verified) {
-    toast(`Skipped invalid file${problems.length > 1 ? 's' : ''}: ${problems.join('; ')}.`, 'warn', 8000);
+  if (problems.length) toast(`Skipped invalid file${problems.length > 1 ? 's' : ''}: ${problems.join('; ')}.`, 'warn', 8000);
+
+  // One model per name: "chair.obj" + "chair.fbx" is the same model twice (keep the best format),
+  // and "tree_LOD0 / tree_LOD1" are detail levels of one model (keep the most detailed).
+  const groupKey = (f) => baseNameOf(f.name).toLowerCase().replace(/[_\-. ]?lod[_\-. ]?\d+$/i, '');
+  const lodOf = (f) => { const m = baseNameOf(f.name).match(/lod[_\-. ]?(\d+)$/i); return m ? Number(m[1]) : -1; };
+  const groups = new Map();
+  for (const f of valid) {
+    const k = groupKey(f);
+    const cur = groups.get(k);
+    const better = !cur || lodOf(f) < lodOf(cur) || (lodOf(f) === lodOf(cur) && LOAD_PRIORITY.indexOf(extOf(f.name)) < LOAD_PRIORITY.indexOf(extOf(cur.name)));
+    if (better) groups.set(k, f);
   }
+  const MAX_MODELS = 12;
+  const models = [...groups.values()].slice(0, MAX_MODELS);
+  if (groups.size > MAX_MODELS) toast(`This drop holds ${groups.size} models — loading the first ${MAX_MODELS}.`, 'warn', 7000);
+
   // glTF that points at separate .bin buffers can't work without them
-  if (verified && extOf(verified.name) === 'gltf' && verified.size <= 300 * 1048576) {
+  for (const g of models.filter((f) => extOf(f.name) === 'gltf' && f.size <= 300 * 1048576)) {
     try {
-      const j = JSON.parse(await verified.text());
+      const j = JSON.parse(await g.text());
       const names = new Set(files.map((f) => f.name.toLowerCase()));
       const missing = (j.buffers || []).map((b) => b.uri).filter((u) => u && !/^data:/i.test(u))
         .map((u) => decodeURIComponent(u.split(/[\\/]/).pop())).filter((u) => !names.has(u.toLowerCase()));
       if (missing.length) {
-        return toast(`${files.zipSource ? `<b>${escapeHTML(files.zipSource.name)}</b> was rejected: ` : ''}<b>${escapeHTML(verified.name)}</b> needs ${escapeHTML(missing.join(', '))}, which ${missing.length > 1 ? 'are' : 'is'} missing. Drop ${missing.length > 1 ? 'them' : 'it'} together with the .gltf (or zip them up together). Nothing was loaded.`, 'error', 11000);
+        return toast(`${files.zipSource ? `<b>${escapeHTML(files.zipSource.name)}</b> was rejected: ` : ''}<b>${escapeHTML(g.name)}</b> needs ${escapeHTML(missing.join(', '))}, which ${missing.length > 1 ? 'are' : 'is'} missing. Drop ${missing.length > 1 ? 'them' : 'it'} together with the .gltf (or zip them up together). Nothing was loaded.`, 'error', 11000);
       }
     } catch (e) { /* checked above */ }
   }
 
-  const map = new Map();
-  const freshURLs = [];
-  for (const f of files) {
-    const base = f.name.split(/[\\/]/).pop();
-    const url = URL.createObjectURL(f);
-    map.set(base.toLowerCase(), { file: f, url });
-    freshURLs.push(url);
-  }
-
-  const primary = verified;
-
-  if (!primary) {
+  if (!models.length) {
     const blend = files.find((f) => extOf(f.name) === 'blend');
     state.originalFile = blend || files[0];
     updateDownloadOriginal();
@@ -614,16 +742,37 @@ async function handleFiles(fileList) {
     return;
   }
 
+  // Map every dropped file by name. TGA images are converted to PNG up front (browsers can't show TGA);
+  // the original bytes stay available for loaders that decode TGA themselves.
+  const map = new Map();
+  const freshURLs = [];
+  for (const f of files) {
+    const base = f.name.split(/[\\/]/).pop();
+    const entry = { file: f, url: URL.createObjectURL(f) };
+    freshURLs.push(entry.url);
+    if (extOf(base) === 'tga') {
+      try {
+        const png = await tgaFileToPNG(f);
+        entry.rawUrl = entry.url;
+        entry.url = URL.createObjectURL(png);
+        freshURLs.push(entry.url);
+      } catch (e) { console.warn('[Online3D] could not decode TGA', base, e); }
+    }
+    map.set(base.toLowerCase(), entry);
+  }
+
+  const primary = models[0];
   state.originalFile = files.zipSource || primary;
   updateDownloadOriginal();
-  // OBJ: warn (don't block) when its material file or textures weren't included
-  if (extOf(primary.name) === 'obj') {
+  // OBJ: warn (don't block) when its material file wasn't included
+  for (const m of models.filter((f) => extOf(f.name) === 'obj')) {
     try {
-      const head = strFromU8(await readHead(primary, 1048576), true);
+      const head = strFromU8(await readHead(m, 1048576), true);
       const names = new Set(files.map((f) => f.name.toLowerCase()));
-      const libs = [...head.matchAll(/^\s*mtllib\s+(.+)$/gm)].map((m) => m[1].trim().split(/[\\/]/).pop());
+      const libs = [...head.matchAll(/^\s*mtllib\s+(.+?)\s*$/gm)].map((x) => x[1].trim().split(/[\\/]/).pop());
+      const anyMtl = files.some((f) => extOf(f.name) === 'mtl');
       const missingLibs = libs.filter((l) => !names.has(l.toLowerCase()));
-      if (missingLibs.length) toast(`<b>${escapeHTML(primary.name)}</b> refers to <b>${escapeHTML(missingLibs.join(', '))}</b> (its colors/materials), which wasn’t included — it will load in plain grey. Drop the .mtl (and textures) together with the .obj to keep them.`, 'warn', 9000);
+      if (missingLibs.length && !anyMtl) toast(`<b>${escapeHTML(m.name)}</b> refers to <b>${escapeHTML(missingLibs.join(', '))}</b> (its colors/materials), which wasn’t included — it will load in plain grey. Drop the .mtl (and textures) together with the .obj to keep them.`, 'warn', 9000);
     } catch (e) {}
   }
   // A .blend dropped next to a loadable model is silently useless — say so instead of ignoring it
@@ -631,20 +780,35 @@ async function handleFiles(fileList) {
   if (strayBlend) {
     toast(`<b>${escapeHTML(strayBlend.name)}</b> (.blend) can’t be opened in-browser — loaded <b>${escapeHTML(primary.name)}</b> instead. To open the .blend, export it as GLB/OBJ from Blender (or use the bundled <b>blend2glb.py</b> script) first.`, 'warn', 9000);
   }
-  setLoading(true, `Loading ${primary.name}…`);
+  if (isMobileLayout() && (files.zipSource || primary).size > 80 * 1048576 &&
+      !window.confirm(`${(files.zipSource || primary).name} is ${fmtBytes((files.zipSource || primary).size)}. Very large models can make a phone's browser run out of memory and reload the page. Load it anyway?`)) return;
   setStatus('Loading…', true);
 
+  let loaded = 0;
   try {
-    const obj = await parseModel(primary, map);
-    const { wasEmpty, recs } = addToScene(obj, extOf(primary.name).toUpperCase(), { name: baseNameOf(primary.name), frame: 'always' });
-    sessionBlobURLs.push(...freshURLs);               // the scene now owns these
-    const tris = recs.reduce((a, r) => a + meshTris(r), 0);
-    toast(`${wasEmpty ? 'Loaded' : 'Added'} <b>${escapeHTML(primary.name)}</b> — ${fmtInt(tris)} triangles, ${recs.length} part${recs.length !== 1 ? 's' : ''}.${wasEmpty ? '' : ' It was placed beside what’s already in the scene; use <b>New Scene</b> to start over.'} Processed 100% locally; nothing was uploaded.`, 'success', 6000);
-  } catch (err) {
-    console.error('[Online3D] Load failed:', err);
-    for (const u of freshURLs) { try { URL.revokeObjectURL(u); } catch (e) {} }
-    toast(`Failed to load <b>${escapeHTML(primary.name)}</b>: ${escapeHTML((err && err.message) || String(err))}`, 'error', 9000);
-    setStatus('Error', false);
+    for (const model of models) {
+      setLoading(true, models.length > 1 ? `Loading ${model.name} (${loaded + 1} of ${models.length})…` : `Loading ${model.name}…`);
+      const ctx = newImportCtx(map);
+      try {
+        const obj = await parseModel(model, ctx);
+        const { wasEmpty, recs } = addToScene(obj, extOf(model.name).toUpperCase(), { name: baseNameOf(model.name), frame: 'always' });
+        loaded++;
+        const tris = recs.reduce((a, r) => a + meshTris(r), 0);
+        if (models.length === 1) {
+          toast(`${wasEmpty ? 'Loaded' : 'Added'} <b>${escapeHTML(model.name)}</b> — ${fmtInt(tris)} triangles, ${recs.length} part${recs.length !== 1 ? 's' : ''}.${wasEmpty ? '' : ' It was placed beside what’s already in the scene; use <b>New Scene</b> to start over.'} Processed 100% locally; nothing was uploaded.`, 'success', 6000);
+        }
+        // textures load in the background — report any that couldn't be used once they're done
+        waitForTextures(ctx).then(() => { reportTextureProblems(ctx, recs, model.name); collectModelTextures(); });
+      } catch (err) {
+        console.error('[Online3D] Load failed:', err);
+        toast(`Failed to load <b>${escapeHTML(model.name)}</b>: ${escapeHTML((err && err.message) || String(err))}`, 'error', 9000);
+      }
+    }
+    if (models.length > 1 && loaded) {
+      toast(`Loaded <b>${loaded}</b> models from ${files.zipSource ? `<b>${escapeHTML(files.zipSource.name)}</b>` : 'your drop'}: ${escapeHTML(models.map((f) => f.name).join(', '))}. Each is a separate object in the Outliner.`, 'success', 7000);
+    }
+    if (loaded) sessionBlobURLs.push(...freshURLs); // the scene now owns these
+    else { for (const u of freshURLs) { try { URL.revokeObjectURL(u); } catch (e) {} } setStatus('Error', false); }
   } finally {
     setLoading(false);
   }
@@ -788,7 +952,9 @@ function prepareObject(object, taken) {
       o.name = uniqueName(o.name || (isPoints ? 'points_' : 'mesh_') + (++idx), taken);
       taken.add(o.name);
     }
-    const editable = !isPoints && !o.isSkinnedMesh &&
+    // Instanced copies (GLB "GPU instancing") are display-only: re-centring their shared shape would
+    // move every rotated/scaled copy to a different wrong place.
+    const editable = !isPoints && !o.isSkinnedMesh && !o.isInstancedMesh && !o.isBatchedMesh &&
       !o.geometry.getAttribute('skinIndex') &&
       !(o.morphTargetInfluences && o.morphTargetInfluences.length);
     if (!isPoints) o.material = toStandardMaterial(o.material, matCache);
@@ -987,6 +1153,7 @@ function updateHeaderMeta() {
 }
 
 function refreshStats() {
+  if (typeof updateMobileInfo === 'function') updateMobileInfo();
   const s = modelStats();
   $('stat-tris-card').textContent = fmtInt(s.tris);
   $('stat-verts-card').textContent = fmtInt(s.verts);
@@ -1048,6 +1215,19 @@ function buildOutliner() {
     row.appendChild(main);
     if (node) {
       main.addEventListener('dblclick', (e) => { e.preventDefault(); renamePart(node); });
+      // touch: press and hold to rename
+      let holdTimer = null, held = false;
+      main.addEventListener('pointerdown', (e) => {
+        if (e.pointerType === 'mouse') return;
+        held = false;
+        holdTimer = setTimeout(() => { held = true; renamePart(node); }, 550);
+      });
+      const cancelHold = () => { clearTimeout(holdTimer); holdTimer = null; };
+      main.addEventListener('pointerup', cancelHold);
+      main.addEventListener('pointerleave', cancelHold);
+      main.addEventListener('pointercancel', cancelHold);
+      main.addEventListener('contextmenu', (e) => { e.preventDefault(); if (!held) { cancelHold(); renamePart(node); } });
+      main.addEventListener('click', (e) => { if (held) { e.stopImmediatePropagation(); held = false; } }, true);
       const mk = (ic, tip, fn, extra = '') => {
         const b = document.createElement('button');
         b.type = 'button';
@@ -1220,7 +1400,9 @@ function setTool(tool, force) {
     renderTexLibrary();
     if (tool === 'faces' && !faceHintShown && state.modelRoot) {
       faceHintShown = true;
-      toast('<b>Faces</b>: click a face to select it (Shift adds, Alt removes). <b>Flat area</b> picks a whole side at once. Then change Color, Material presets or Textures in the Inspector — only those faces change.', 'info', 9000);
+      toast(isMobileLayout()
+        ? '<b>Faces</b>: tap a face to select it — use <b>+ Add</b> / <b>− Remove</b> in the panel to build up a selection. <b>Flat area</b> picks a whole side at once. Then use the <b>Materials</b> tab — only those faces change.'
+        : '<b>Faces</b>: click a face to select it (Shift adds, Alt removes). <b>Flat area</b> picks a whole side at once. Then change Color, Material presets or Textures in the Inspector — only those faces change.', 'info', 9000);
     }
   }
   document.querySelectorAll('.transform-tool-btn').forEach((b) => {
@@ -1244,6 +1426,7 @@ function attachGizmo() {
 }
 
 function syncTransformInputs() {
+  if (typeof updateMobileInfo === 'function') updateMobileInfo();
   const r = transformTarget();
   if (!r) return;
   $('pos-x').value = r.position.x.toFixed(2);
@@ -2276,7 +2459,7 @@ function saveBlob(blob, name) {
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 }
 
-async function doExport() {
+async function doExport(opts = {}) {
   if (!state.modelRoot) { toast('Load a model first — drop a file or pick a sample.', 'warn'); return; }
   if (state.viewMode !== 'pbr') {
     setViewMode('pbr'); // export must carry the real materials, not the wire/matcap/xray display override
@@ -2317,7 +2500,11 @@ async function doExport() {
     } else {
       throw new Error('Unknown format');
     }
-    if (blob) {
+    if (blob && opts.share) {
+      label.textContent = 'Sharing…';
+      const shared = await shareBlob(blob, name);
+      label.textContent = shared ? 'Shared!' : 'Export Ready!';
+    } else if (blob) {
       saveBlob(blob, name);
       label.textContent = 'Export Ready!';
       toast(`Exported <b>${escapeHTML(name)}</b> (${fmtBytes(blob.size)}) — all edits baked in. Check your downloads.`, 'success', 5000);
@@ -2330,6 +2517,23 @@ async function doExport() {
     btn.disabled = false;
     setTimeout(updateDownloadLabel, 1200);
   }
+}
+
+// Send a file through the phone's share sheet; falls back to a normal download
+async function shareBlob(blob, name) {
+  try {
+    const file = new File([blob], name, { type: blob.type || 'application/octet-stream' });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title: name });
+      return true;
+    }
+  } catch (e) {
+    if (e && e.name === 'AbortError') return false; // user closed the share sheet
+    console.warn('[Online3D] share failed, downloading instead:', e);
+  }
+  saveBlob(blob, name);
+  toast(`Sharing isn’t available here — <b>${escapeHTML(name)}</b> was downloaded instead.`, 'info', 4500);
+  return false;
 }
 
 /* ---------- OBJ + MTL + textures, zipped ----------
@@ -2487,7 +2691,9 @@ function updateDownloadLabel() {
   const fmt = state.exportFormat;
   const zip = fmt === 'obj' && $('chk-obj-zip').checked;
   $('obj-zip-row').classList.toggle('hidden', fmt !== 'obj');
-  $('btn-download-label').textContent = `Download Model (${zip ? 'OBJ .zip' : fmt.toUpperCase()})`;
+  $('btn-download-label').textContent = document.body.classList.contains('mobile')
+    ? `Export ${zip ? 'OBJ .zip' : fmt.toUpperCase()}`
+    : `Download Model (${zip ? 'OBJ .zip' : fmt.toUpperCase()})`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2559,6 +2765,7 @@ function typicalSize() {
 // materials, created on the first edit; reset whenever the selection changes)
 state.faceSel = null;
 let faceMode = 'flat';
+let faceClickMode = 'set'; // what a plain click does: set / add / remove (Shift / Alt override on a computer)
 let faceAngle = 15;
 let faceHintShown = false;
 const adjCache = new WeakMap(); // geometry -> { start, list, normals, triCount }
@@ -2718,6 +2925,12 @@ function updateFacePanel() {
     b.classList.toggle('text-on-surface-variant', !on);
   });
   $('face-angle-row').classList.toggle('opacity-40', faceMode !== 'flat');
+  document.querySelectorAll('.face-click-btn').forEach((b) => {
+    const on = b.dataset.fclick === faceClickMode;
+    b.classList.toggle('bg-primary-container/40', on);
+    b.classList.toggle('text-primary', on);
+    b.classList.toggle('text-on-surface-variant', !on);
+  });
   const fs = state.faceSel;
   const n = fs && state.meshes.includes(fs.rec) ? fs.set.size : 0;
   $('face-count').textContent = n
@@ -2736,7 +2949,7 @@ function updateMaterialScopeLabel() {
 
 function onFaceClick(e, hit) {
   const rec = hit ? recOf(hit.object) : null;
-  const how = e.shiftKey ? 'add' : e.altKey ? 'remove' : 'set';
+  const how = e.shiftKey ? 'add' : e.altKey ? 'remove' : faceClickMode;
   if (!rec) { if (how === 'set') clearFaceSelection(); return; }
   if (!rec.editable) return toast('Faces of animated (skinned) parts can’t be selected.', 'warn', 4000);
   if (hit.faceIndex == null) return;
@@ -3051,6 +3264,7 @@ function renderTexPreview() {
 }
 
 function revealTexturesPanel() {
+  if (isMobileLayout()) { openSheetTab('materials'); return; }
   if (typeof setPanel === 'function' && !ui.right) setPanel('right', true);
   if (typeof setSection === 'function' && ui.sections.textures) { setSection('textures', false); saveUI(); }
 }
@@ -3714,6 +3928,177 @@ window.addEventListener('keydown', (e) => {
 });
 
 /* ------------------------------------------------------------------ */
+/* Mobile layout                                                       */
+/* ------------------------------------------------------------------ */
+// Phones (and small touch tablets) get a different layout: the 3D view on top and a bottom sheet with
+// tabs. The desktop panels' sections are *moved* into the sheet (not copied), so every control keeps
+// working the same way; switching back puts them where they were.
+
+const isTouch = matchMedia('(pointer: coarse)').matches;
+const autoMobileMQ = matchMedia('(max-width: 767px), (pointer: coarse) and (max-width: 1023px)');
+function isMobileLayout() {
+  const mode = (typeof ui !== 'undefined' && ui.layout) || 'auto';
+  return mode === 'mobile' || (mode === 'auto' && autoMobileMQ.matches);
+}
+
+const MOVES = [ // [element, mobile destination]
+  () => [$('transform-bar'), $('sheet-tools')],
+  () => [$('sec-transform'), document.querySelector('[data-pane="transform"]')],
+  () => [$('sec-material'), document.querySelector('[data-pane="materials"]')],
+  () => [$('sec-textures'), document.querySelector('[data-pane="materials"]')],
+  () => [$('sec-geometry'), document.querySelector('[data-pane="mesh"]')],
+  () => [$('model-card'), document.querySelector('[data-pane="scene"]')],
+  () => [$('outliner-list').previousElementSibling, document.querySelector('[data-pane="scene"]')],
+  () => [$('outliner-list'), document.querySelector('[data-pane="scene"]')],
+  () => [$('btn-download-original'), document.querySelector('[data-pane="scene"]')],
+  () => [$('export-dock'), $('sheet-export')],
+];
+let movedHome = null; // [{el, parent, next}] while in the mobile layout
+let sheetState = 'half';
+let sheetTab = 'transform';
+
+function applyLayout() {
+  const mobile = isMobileLayout();
+  if (mobile && !movedHome) {
+    movedHome = [];
+    for (const f of MOVES) {
+      const [el, dest] = f();
+      if (!el || !dest) continue;
+      movedHome.push({ el, parent: el.parentNode, next: el.nextSibling });
+      dest.appendChild(el);
+    }
+  } else if (!mobile && movedHome) {
+    for (const m of movedHome.reverse()) m.parent.insertBefore(m.el, m.next && m.next.parentNode === m.parent ? m.next : null);
+    movedHome = null;
+  }
+  document.body.classList.toggle('mobile', mobile);
+  $('mobile-menu').classList.add('hidden');
+  document.querySelectorAll('.mm-item[data-act="layout"]').forEach((b) => b.classList.toggle('active', b.dataset.layout === ((ui && ui.layout) || 'auto')));
+  tc.setSize(isTouch || mobile ? 1.35 : 0.9);
+  updateDownloadLabel();
+  if (mobile) { setSheetTab(sheetTab, false); setSheet(sheetState); }
+  setTimeout(resize, 30);
+}
+
+// ---- bottom sheet: three heights, drag the handle (or the tab bar) to resize ----
+const sheet = $('mobile-sheet');
+function sheetHeights() {
+  const total = $('viewport-height').clientHeight || window.innerHeight;
+  const peek = $('sheet-handle').offsetHeight + $('sheet-tools').offsetHeight + $('sheet-tabs').offsetHeight + 12;
+  return { collapsed: peek, half: Math.max(peek, Math.round(total * 0.58)), full: Math.max(peek, Math.round(total * 0.86)) };
+}
+function setSheet(stateName) {
+  sheetState = stateName;
+  sheet.style.height = sheetHeights()[stateName] + 'px';
+  $('sheet-content').classList.toggle('invisible', stateName === 'collapsed');
+}
+function setSheetTab(tab, open = true) {
+  sheetTab = tab;
+  document.querySelectorAll('.sheet-tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
+  document.querySelectorAll('.sheet-pane').forEach((p) => p.classList.toggle('hidden', p.dataset.pane !== tab));
+  if (open && sheetState === 'collapsed') setSheet('half');
+}
+function openSheetTab(tab) { setSheetTab(tab); if (sheetState === 'collapsed') setSheet('half'); }
+
+let sheetDrag = null;
+function sheetPointerDown(e) {
+  sheetDrag = { y: e.clientY, h: sheet.offsetHeight, moved: false, id: e.pointerId, target: e.currentTarget };
+}
+window.addEventListener('pointermove', (e) => {
+  if (!sheetDrag || e.pointerId !== sheetDrag.id) return;
+  const dy = sheetDrag.y - e.clientY;
+  if (!sheetDrag.moved && Math.abs(dy) < 8) return;
+  if (!sheetDrag.moved) { sheetDrag.moved = true; sheet.classList.add('dragging'); $('sheet-content').classList.remove('invisible'); }
+  const hs = sheetHeights();
+  sheet.style.height = clamp(sheetDrag.h + dy, hs.collapsed, Math.round(($('viewport-height').clientHeight || innerHeight) * 0.9)) + 'px';
+});
+window.addEventListener('pointerup', (e) => {
+  if (!sheetDrag || e.pointerId !== sheetDrag.id) return;
+  const d = sheetDrag;
+  sheetDrag = null;
+  if (!d.moved) return;
+  sheet.classList.remove('dragging');
+  const h = sheet.offsetHeight, hs = sheetHeights();
+  const best = Object.entries(hs).sort((a, b) => Math.abs(a[1] - h) - Math.abs(b[1] - h))[0][0];
+  setSheet(best);
+  // a drag that started on a tab mustn't also count as a tap on it
+  const swallow = (ev) => { ev.stopPropagation(); ev.preventDefault(); };
+  window.addEventListener('click', swallow, { capture: true, once: true });
+  setTimeout(() => window.removeEventListener('click', swallow, { capture: true }), 50);
+});
+$('sheet-handle').addEventListener('pointerdown', sheetPointerDown);
+$('sheet-tabs').addEventListener('pointerdown', sheetPointerDown);
+$('sheet-handle').addEventListener('click', () => setSheet(sheetState === 'collapsed' ? 'half' : sheetState === 'half' ? 'full' : 'collapsed'));
+document.querySelectorAll('.sheet-tab').forEach((b) => b.addEventListener('click', () => {
+  if (b.dataset.tab === sheetTab && sheetState !== 'collapsed') return setSheet('collapsed'); // tap the open tab again to fold
+  setSheetTab(b.dataset.tab);
+}));
+window.addEventListener('resize', () => { if (document.body.classList.contains('mobile')) setSheet(sheetState); });
+
+// ---- ☰ menu ----
+const mMenu = $('mobile-menu');
+$('btn-mobile-menu').addEventListener('click', (e) => { e.stopPropagation(); mMenu.classList.toggle('hidden'); });
+document.addEventListener('click', (e) => { if (!mMenu.contains(e.target) && !e.target.closest('#btn-mobile-menu')) mMenu.classList.add('hidden'); });
+mMenu.addEventListener('click', (e) => {
+  const b = e.target.closest('.mm-item');
+  if (!b) return;
+  e.stopPropagation(); // don't let the page-wide "close popovers" handler undo what this item opens
+  mMenu.classList.add('hidden');
+  const act = b.dataset.act;
+  if (act === 'import') fileInput.click();
+  else if (act === 'add') { $('shape-popover').classList.remove('hidden'); }
+  else if (act === 'new') $('nav-new').click();
+  else if (act === 'sample') loadSample(b.dataset.sample);
+  else if (act === 'preview') setPreview(true);
+  else if (act === 'grid') $('btn-toggle-grid').click();
+  else if (act === 'light') { setLightPreset((Math.max(state.lightPreset, 0) + 1) % LIGHT_PRESETS.length); toast(`Lighting: <b>${LIGHT_PRESETS[state.lightPreset].name}</b>`, 'info', 1800); }
+  else if (act === 'layout') { ui.layout = b.dataset.layout; saveUI(); applyLayout(); toast(`Layout: <b>${b.textContent.trim()}</b>`, 'info', 2000); }
+});
+autoMobileMQ.addEventListener('change', applyLayout);
+
+// ---- 3D-view overlays ----
+$('mobile-camtoggle').addEventListener('click', () => setCamType(state.camType === 'persp' ? 'ortho' : 'persp'));
+$('mobile-import').addEventListener('click', () => fileInput.click());
+const fmtDim = (v) => (v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2));
+function updateMobileInfo() {
+  const dims = $('mobile-dims'), tris = $('mobile-tris');
+  if (!dims) return;
+  if (!state.modelRoot) { dims.textContent = '—'; tris.textContent = 'empty scene'; return; }
+  const target = state.scope || state.modelRoot;
+  const b = new THREE.Box3().setFromObject(target);
+  const sz = b.isEmpty() ? new THREE.Vector3() : b.getSize(new THREE.Vector3());
+  dims.textContent = `${fmtDim(sz.x)} × ${fmtDim(sz.y)} × ${fmtDim(sz.z)} units`;
+  const st = scopeStats();
+  const parts = scopeRecs().length;
+  tris.textContent = `${fmtK(st.tris)} tris • ${parts} part${parts !== 1 ? 's' : ''}${state.scope ? ' • ' + (state.scope.name || '') : ''}`;
+}
+
+// ---- +/− steppers for the number boxes (touch-friendly) ----
+const STEPS = { pos: () => { const t = transformTarget(); const b = t && new THREE.Box3().setFromObject(t); return b && !b.isEmpty() ? Math.max(+(b.getSize(new THREE.Vector3()).length() * 0.05).toPrecision(1), 0.01) : 0.1; }, rot: () => 15, scl: () => 0.1 };
+for (const id of ['pos-x', 'pos-y', 'pos-z', 'rot-x', 'rot-y', 'rot-z', 'scl-x', 'scl-y', 'scl-z']) {
+  const inp = $(id), wrap = inp.parentElement, kind = id.slice(0, 3);
+  const box = document.createElement('div');
+  box.className = 'stepper-btn flex-col shrink-0 border-l border-white/5';
+  box.innerHTML = '<button type="button" class="px-2 py-0.5 text-on-surface-variant active:bg-surface-container-high" data-d="1">+</button><button type="button" class="px-2 py-0.5 text-on-surface-variant active:bg-surface-container-high" data-d="-1">−</button>';
+  box.addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b || !transformTarget()) return;
+    const cur = parseFloat(String(inp.value).replace(/[^0-9.eE+-]/g, '')) || 0;
+    inp.value = +(cur + Number(b.dataset.d) * STEPS[kind]()).toFixed(4);
+    commitTransformFromInputs();
+  });
+  wrap.appendChild(box);
+}
+
+// ---- face-select click mode, share, touch file pickers ----
+document.querySelectorAll('.face-click-btn').forEach((b) => b.addEventListener('click', () => { faceClickMode = b.dataset.fclick; updateFacePanel(); }));
+const canShareFiles = (() => { try { return !!(navigator.canShare && navigator.canShare({ files: [new File(['x'], 'x.txt', { type: 'text/plain' })] })); } catch (e) { return false; } })();
+$('btn-share').classList.toggle('share-off', !canShareFiles);
+$('btn-share').addEventListener('click', () => doExport({ share: true }));
+// Phone file pickers can grey out unfamiliar types (.obj, .fbx, .glb…); our own checks reject wrong files anyway
+if (isTouch) fileInput.removeAttribute('accept');
+
+/* ------------------------------------------------------------------ */
 /* Boot                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -3733,6 +4118,8 @@ syncPolySliderUI();
 updatePresetChips();
 updatePartButtons();
 updateFacePanel();
+applyLayout();
+updateMobileInfo();
 updateDownloadLabel();
 renderTexLibrary();
 syncTextureControls();
