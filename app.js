@@ -33,7 +33,7 @@ import { unzipSync, zipSync, strToU8, strFromU8 } from 'three/addons/libs/fflate
 
 // App version — shown in the header. Rules: +0.1 for a small feature update, +1 for a revamp or
 // major feature update, and a letter suffix (b, c, d…) for bug-fix-only releases of the same version.
-const APP_VERSION = 'v2.2';
+const APP_VERSION = 'v2.3';
 
 const THREE_CDN = 'https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/';
 const GH_MODELS = 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r170/examples/models/';
